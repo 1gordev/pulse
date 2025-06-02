@@ -14,6 +14,7 @@ public class PulseTestMeasureTransformReq {
 
     private String measurePath = "";
     private String script = "";
+    private Object currentValue = null;
     private Map<String, Object> testData = new HashMap<>();
 
 }

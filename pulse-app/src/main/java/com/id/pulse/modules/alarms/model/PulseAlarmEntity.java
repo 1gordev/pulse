@@ -22,11 +22,11 @@ public class PulseAlarmEntity {
     public static final String ID = "ID";
     public static final String PATH = "PATH";
     public static final String DESCRIPTION = "DESCRIPTION";
-    public static final String UPSTREAMS = "UPSTREAMS";
     public static final String TARGET_MEASURE_PATH = "TARGET_MEASURE_PATH";
     public static final String ENGAGE_DURATION = "ENGAGE_DURATION";
     public static final String DISENGAGE_DURATION = "DISENGAGE_DURATION";
-    public static final String INLINE_CONDITION = "INLINE_CONDITION";
+    public static final String ENGAGE_CONDITION = "ENGAGE_CONDITION";
+    public static final String DISENGAGE_CONDITION = "DISENGAGE_CONDITION";
     public static final String DETAILS = "DETAILS";
 
     @Id
@@ -36,11 +36,11 @@ public class PulseAlarmEntity {
     private String path;
 
     private String description;
-    private List<PulseUpStream> upstreams;
     private String targetMeasurePath;
     private Long engageDuration;
     private Long disengageDuration;
-    private String inlineCondition;
+    private String engageCondition;
+    private String disengageCondition;
     private Map<String, Object> details;
 
 }

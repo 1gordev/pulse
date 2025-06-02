@@ -36,13 +36,9 @@ class AlarmJsCodeGeneratorTest {
     @Test
     void generatesNumberAndBooleanJSForChannels() {
         var upTemp = PulseUpStream.builder()
-                .path("TEMP_1")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
+                .path("TEMP_1").sourceType(PulseSourceType.CHANNEL).build();
         var upValve = PulseUpStream.builder()
-                .path("VALVE")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
+                .path("VALVE").sourceType(PulseSourceType.CHANNEL).build();
 
         Mockito.when(channelsCrudService.findByPaths(List.of("TEMP_1", "VALVE")))
                 .thenReturn(List.of(
@@ -52,7 +48,7 @@ class AlarmJsCodeGeneratorTest {
         Mockito.when(measuresCrudService.findByPaths(List.of())).thenReturn(List.of());
 
         String engageCondition = "{{TEMP_1}} > 50 && {{VALVE}}";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upTemp, upValve));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upTemp, upValve));
         assertTrue(js.contains("const _v_TEMP_1 = _parser.toNumbers('TEMP_1', 0.0, _timestamps);"));
         assertTrue(js.contains("const _v_VALVE = _parser.toBooleans('VALVE', false, _timestamps);"));
         assertTrue(js.contains("if(_current === false && evaluateEngage())"));
@@ -61,15 +57,13 @@ class AlarmJsCodeGeneratorTest {
     @Test
     void generatesStringJSForMeasure() {
         var upCode = PulseUpStream.builder()
-                .path("CODE")
-                .sourceType(PulseSourceType.MEASURE)
-                .build();
+                .path("CODE").sourceType(PulseSourceType.MEASURE).build();
         Mockito.when(channelsCrudService.findByPaths(List.of())).thenReturn(List.of());
         Mockito.when(measuresCrudService.findByPaths(List.of("CODE")))
                 .thenReturn(List.of(PulseMeasure.builder().path("CODE").dataType(PulseDataType.STRING).build()));
 
         String engageCondition = "{{CODE}} === 'A'";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upCode));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upCode));
         assertTrue(js.contains("const _v_CODE = _parser.toStrings('CODE', '', _timestamps);"));
         assertTrue(js.contains("evaluateEngage()"));
     }
@@ -77,95 +71,71 @@ class AlarmJsCodeGeneratorTest {
     @Test
     void throwsIfPathNotFound() {
         var upX = PulseUpStream.builder()
-                .path("NOT_FOUND")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
-        Mockito.when(channelsCrudService.findByPaths(List.of("NOT_FOUND")))
-                .thenReturn(List.of());
+                .path("NOT_FOUND").sourceType(PulseSourceType.CHANNEL).build();
+        Mockito.when(channelsCrudService.findByPaths(List.of("NOT_FOUND"))).thenReturn(List.of());
         Mockito.when(measuresCrudService.findByPaths(List.of())).thenReturn(List.of());
 
         String engageCondition = "{{NOT_FOUND}} > 0";
         Exception ex = assertThrows(IllegalArgumentException.class, () ->
-                generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upX))
+                generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upX))
         );
         assertTrue(ex.getMessage().contains("Upstream path not found"));
     }
 
     @Test
     void supportsSpacesInBraces() {
-        var up = PulseUpStream.builder()
-                .path("TEMP_1")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
+        var up = PulseUpStream.builder().path("TEMP_1").sourceType(PulseSourceType.CHANNEL).build();
         Mockito.when(channelsCrudService.findByPaths(List.of("TEMP_1")))
                 .thenReturn(List.of(PulseChannel.builder().path("TEMP_1").dataType(PulseDataType.DOUBLE).build()));
         Mockito.when(measuresCrudService.findByPaths(List.of())).thenReturn(List.of());
 
         String engageCondition = "{{    TEMP_1   }} >= 10";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(up));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(up));
         assertTrue(js.contains("_v_TEMP_1[idx] >= 10"));
     }
 
     @Test
     void supportsMultipleUsagesOfSamePath() {
-        var up = PulseUpStream.builder()
-                .path("TEMP_1")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
+        var up = PulseUpStream.builder().path("TEMP_1").sourceType(PulseSourceType.CHANNEL).build();
         Mockito.when(channelsCrudService.findByPaths(List.of("TEMP_1")))
                 .thenReturn(List.of(PulseChannel.builder().path("TEMP_1").dataType(PulseDataType.DOUBLE).build()));
         Mockito.when(measuresCrudService.findByPaths(List.of())).thenReturn(List.of());
 
         String engageCondition = "{{TEMP_1}} > 0 && {{TEMP_1}} < 100";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(up));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(up));
         assertEquals(4, js.split("_v_TEMP_1\\[idx\\]").length - 1);
     }
 
     @Test
     void supportsChannelPathsWithSlashes() {
-        var upCh = PulseUpStream.builder()
-                .path("Channels/TEMP_1")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
+        var upCh = PulseUpStream.builder().path("Channels/TEMP_1").sourceType(PulseSourceType.CHANNEL).build();
         Mockito.when(channelsCrudService.findByPaths(List.of("Channels/TEMP_1")))
-                .thenReturn(List.of(
-                        PulseChannel.builder().path("Channels/TEMP_1").dataType(PulseDataType.DOUBLE).build()
-                ));
+                .thenReturn(List.of(PulseChannel.builder().path("Channels/TEMP_1").dataType(PulseDataType.DOUBLE).build()));
         Mockito.when(measuresCrudService.findByPaths(List.of())).thenReturn(List.of());
 
         String engageCondition = "{{Channels/TEMP_1}} > 10";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upCh));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upCh));
         assertTrue(js.contains("const _v_Channels_TEMP_1 = _parser.toNumbers('Channels/TEMP_1', 0.0, _timestamps);"));
         assertTrue(js.contains("_v_Channels_TEMP_1[idx] > 10"));
     }
 
     @Test
     void supportsMeasurePathsWithSlashes() {
-        var upMeas = PulseUpStream.builder()
-                .path("Measures/Valves/OPEN_PERCENTAGE")
-                .sourceType(PulseSourceType.MEASURE)
-                .build();
-
+        var upMeas = PulseUpStream.builder().path("Measures/Valves/OPEN_PERCENTAGE").sourceType(PulseSourceType.MEASURE).build();
         Mockito.when(channelsCrudService.findByPaths(List.of())).thenReturn(List.of());
         Mockito.when(measuresCrudService.findByPaths(List.of("Measures/Valves/OPEN_PERCENTAGE")))
                 .thenReturn(List.of(PulseMeasure.builder().path("Measures/Valves/OPEN_PERCENTAGE").dataType(PulseDataType.DOUBLE).build()));
 
         String engageCondition = "{{Measures/Valves/OPEN_PERCENTAGE}} >= 80";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upMeas));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upMeas));
         assertTrue(js.contains("const _v_Measures_Valves_OPEN_PERCENTAGE = _parser.toNumbers('Measures/Valves/OPEN_PERCENTAGE', 0.0, _timestamps);"));
         assertTrue(js.contains("_v_Measures_Valves_OPEN_PERCENTAGE[idx] >= 80"));
     }
 
     @Test
     void supportsMixOfChannelAndMeasurePathsWithSlashes() {
-        var upCh = PulseUpStream.builder()
-                .path("Channels/HUMIDITY")
-                .sourceType(PulseSourceType.CHANNEL)
-                .build();
-        var upMeas = PulseUpStream.builder()
-                .path("Measures/Valves/OPEN_PERCENTAGE")
-                .sourceType(PulseSourceType.MEASURE)
-                .build();
+        var upCh = PulseUpStream.builder().path("Channels/HUMIDITY").sourceType(PulseSourceType.CHANNEL).build();
+        var upMeas = PulseUpStream.builder().path("Measures/Valves/OPEN_PERCENTAGE").sourceType(PulseSourceType.MEASURE).build();
 
         Mockito.when(channelsCrudService.findByPaths(List.of("Channels/HUMIDITY")))
                 .thenReturn(List.of(PulseChannel.builder().path("Channels/HUMIDITY").dataType(PulseDataType.DOUBLE).build()));
@@ -173,7 +143,7 @@ class AlarmJsCodeGeneratorTest {
                 .thenReturn(List.of(PulseMeasure.builder().path("Measures/Valves/OPEN_PERCENTAGE").dataType(PulseDataType.DOUBLE).build()));
 
         String engageCondition = "{{Channels/HUMIDITY}} < 40 && {{Measures/Valves/OPEN_PERCENTAGE}} >= 80";
-        String js = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upCh, upMeas));
+        String js = generator.generate(engageCondition, 1000000L, null, 1000000L, List.of(upCh, upMeas));
         assertTrue(js.contains("const _v_Channels_HUMIDITY = _parser.toNumbers('Channels/HUMIDITY', 0.0, _timestamps);"));
         assertTrue(js.contains("const _v_Measures_Valves_OPEN_PERCENTAGE = _parser.toNumbers('Measures/Valves/OPEN_PERCENTAGE', 0.0, _timestamps);"));
         assertTrue(js.contains("_v_Channels_HUMIDITY[idx] < 40 && _v_Measures_Valves_OPEN_PERCENTAGE[idx] >= 80"));
@@ -186,7 +156,6 @@ class AlarmJsCodeGeneratorTest {
         PulseDataMatrix matrix = PulseDataMatrix.builder()
                 .add("main", "TEMP_1", 1000L, 55.0)
                 .add("main", "VALVE", 1000L, true)
-                .add("main", TARGET_PATH, 1000L, false)
                 .build();
         PulseDataMatrixParser parser = PulseDataMatrixParser.from(matrix);
 
@@ -205,10 +174,11 @@ class AlarmJsCodeGeneratorTest {
         var generator = new AlarmJsCodeGenerator(chs, ms);
 
         String engageCondition = "{{TEMP_1}} > 50 && {{VALVE}}";
-        String jsScript = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upTemp, upValve));
+        String jsScript = generator.generate(engageCondition, 10000L, null, 10000L, List.of(upTemp, upValve));
 
         MeasureJsEvaluator evaluator = new MeasureJsEvaluator();
-        var result = evaluator.evaluate(jsScript, parser, "test");
+        // _current = false
+        var result = evaluator.evaluate(1000L, jsScript, parser, false,"test");
         assertTrue(result.isOk(), "Script should evaluate without errors");
         assertTrue(result.getResult() instanceof Boolean && (Boolean) result.getResult(), "Alarm should trigger (true)");
     }
@@ -218,7 +188,6 @@ class AlarmJsCodeGeneratorTest {
         PulseDataMatrix matrix = PulseDataMatrix.builder()
                 .add("main", "TEMP_1", 1000L, 10.0)
                 .add("main", "VALVE", 1000L, false)
-                .add("main", TARGET_PATH, 1000L, false)
                 .build();
         PulseDataMatrixParser parser = PulseDataMatrixParser.from(matrix);
 
@@ -237,10 +206,10 @@ class AlarmJsCodeGeneratorTest {
         var generator = new AlarmJsCodeGenerator(chs, ms);
 
         String engageCondition = "{{TEMP_1}} > 50 && {{VALVE}}";
-        String jsScript = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upTemp, upValve));
+        String jsScript = generator.generate(engageCondition, 10000L, null, 10000L, List.of(upTemp, upValve));
 
         MeasureJsEvaluator evaluator = new MeasureJsEvaluator();
-        var result = evaluator.evaluate(jsScript, parser, "test");
+        var result = evaluator.evaluate(1000L, jsScript, parser, false, "test");
         assertTrue(result.isOk(), "Script should evaluate without errors");
         assertFalse((Boolean) result.getResult(), "Alarm should NOT trigger (false)");
     }
@@ -258,7 +227,6 @@ class AlarmJsCodeGeneratorTest {
                 .add("main", "TEMP_2", 3000L, 300.0)
                 .add("main", "TEMP_2", 4000L, 400.0)
                 .add("main", "TEMP_2", 5000L, 500.0)
-                .add("main", TARGET_PATH, 5000L, false)
                 .build();
         PulseDataMatrixParser parser = PulseDataMatrixParser.from(matrix);
 
@@ -277,13 +245,13 @@ class AlarmJsCodeGeneratorTest {
         var generator = new AlarmJsCodeGenerator(chs, ms);
 
         String engageCondition = "{{TEMP_1}} * 10 == {{TEMP_2}}";
-        String jsScript = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upA, upB));
+        String jsScript = generator.generate(engageCondition, 5000L, null, 5000L, List.of(upA, upB));
 
         MeasureJsEvaluator evaluator = new MeasureJsEvaluator();
-        var result = evaluator.evaluate(jsScript, parser, "test");
+        var result = evaluator.evaluate(5000L, jsScript, parser, false, "test");
         assertTrue(result.isOk(), "Script should evaluate without errors");
         assertTrue(result.getResult() instanceof Boolean && (Boolean) result.getResult(),
-                "Condition should be true for all timestamps");
+                "Condition should be true for all timestamps in window");
     }
 
     @Test
@@ -303,7 +271,6 @@ class AlarmJsCodeGeneratorTest {
         for (long t = 1000L; t <= 4400L; t += 240L) {
             builder.add("main", "C", t, 100.0 + t);
         }
-        builder.add("main", TARGET_PATH, 4400L, false);
         PulseDataMatrix matrix = builder.build();
         PulseDataMatrixParser parser = PulseDataMatrixParser.from(matrix);
 
@@ -324,12 +291,12 @@ class AlarmJsCodeGeneratorTest {
         var generator = new AlarmJsCodeGenerator(chs, ms);
 
         String engageCondition = "{{A}} >= 1 && {{B}} < 50 && {{C}} >= 1000";
-        String jsScript = generator.interpolate(TARGET_PATH, engageCondition, null, List.of(upA, upB, upC));
+        String jsScript = generator.generate(engageCondition, 4400L, null, 4400L, List.of(upA, upB, upC));
 
         MeasureJsEvaluator evaluator = new MeasureJsEvaluator();
-        var result = evaluator.evaluate(jsScript, parser, "test");
+        var result = evaluator.evaluate(4400L, jsScript, parser, false, "test");
         assertTrue(result.isOk(), "Script should evaluate without errors");
         assertTrue(result.getResult() instanceof Boolean && (Boolean) result.getResult(),
-                "Condition should be true for all merged timestamps");
+                "Condition should be true for all merged timestamps in window");
     }
 }

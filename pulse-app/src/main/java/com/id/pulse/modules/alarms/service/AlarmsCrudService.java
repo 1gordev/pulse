@@ -4,8 +4,10 @@ import com.id.pulse.modules.alarms.PulseAlarm;
 import com.id.pulse.modules.alarms.model.PulseAlarmEntity;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.channel.service.ChannelsCrudService;
+import com.id.pulse.modules.measures.logic.AlarmJsCodeGenerator;
 import com.id.pulse.modules.measures.model.PulseMeasure;
 import com.id.pulse.modules.measures.model.PulseUpStream;
+import com.id.pulse.modules.measures.model.enums.PulseSourceType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
 import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.px3.crud.logic.PxDefaultCrudServiceMongo;
@@ -24,16 +26,18 @@ import static org.springframework.data.mongodb.core.query.Query.query;
 @Slf4j
 public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, PulseAlarmEntity, String> {
 
+    private final AlarmJsCodeGenerator alarmJsCodeGenerator;
     private final ChannelsCrudService channelsCrudService;
     private final MeasuresCrudService measuresCrudService;
     private final MongoTemplate mongoTemplate;
 
-    public AlarmsCrudService(ChannelsCrudService channelsCrudService,
+    public AlarmsCrudService(AlarmJsCodeGenerator alarmJsCodeGenerator, ChannelsCrudService channelsCrudService,
                              MeasuresCrudService measuresCrudService,
                              MongoTemplate mongoTemplate) {
         super(mongoTemplate,
                 new PxDefaultMapper<>(PulseAlarm.class, PulseAlarmEntity.class),
                 PxDefaultCrudServiceMongo.DEFAULT_COLLECTION_NAME);
+        this.alarmJsCodeGenerator = alarmJsCodeGenerator;
         this.channelsCrudService = channelsCrudService;
         this.measuresCrudService = measuresCrudService;
         this.mongoTemplate = mongoTemplate;
@@ -48,7 +52,7 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
     @Transactional
     public PulseAlarm save(PulseAlarm model) {
         var alarm = super.save(model);
-        measuresCrudService.save(createEngageMeasure(null, alarm));
+        measuresCrudService.save(createTargetMeasure(null, alarm));
         return alarm;
     }
 
@@ -60,7 +64,7 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
         var targetMeasureId = measuresCrudService.findByPath(alarm.getTargetMeasurePath())
                 .orElseThrow(() -> new IllegalArgumentException("Target measure not found for alarm: " + id))
                 .getId();
-        measuresCrudService.update(targetMeasureId, createEngageMeasure(targetMeasureId, alarm));
+        measuresCrudService.update(targetMeasureId, createTargetMeasure(targetMeasureId, alarm));
         return alarm;
     }
 
@@ -111,79 +115,60 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
                 .toList();
     }
 
-    private PulseMeasure createEngageMeasure(String targetMeasureId, PulseAlarm alarm) {
+    private PulseMeasure createTargetMeasure(String targetMeasureId, PulseAlarm alarm) {
 
-
+        var upstreams = generateUpstreams(alarm);
 
         return PulseMeasure.builder()
                 .id(targetMeasureId)
                 .path(alarm.getTargetMeasurePath())
-                .upstreams(alarm.getUpstreams())
+                .upstreams(upstreams)
                 .description("ALARM: " + alarm.getDescription())
                 .dataType(PulseDataType.BOOLEAN)
-                .transformType(PulseTransformType.COPY_LATEST)
+                .transformType(PulseTransformType.JAVASCRIPT)
                 .details(Map.of(
                         "alarm_id", alarm.getId(),
-                        "js_script", createEngageConditionScript(alarm)
+                        "js_script", generateAlarmConditionScript(alarm, upstreams),
+                        "js_script_autogen", true
                 ))
                 .build();
     }
 
-    private String createEngageConditionScript(PulseAlarm alarm) {
-        // Create blocks to get upstreams values
-        List<String> functions = new ArrayList<>();
-        List<String> statements = new ArrayList<>();
-        alarm.getUpstreams().forEach(ups -> {
-            functions.add(createExtractionFunction(ups));
-            statements.add(createExtractionStatement(ups));
-        });
-
-        // Assemble the script
-        return String.join("\n", functions) + "\n" +
-               "function evaluate() {\n" +
-               "    let vals = {};\n" +
-               "    " + String.join("\n", statements) + "\n" +
-               "    return " + alarm.getCondition() + ";\n" +
-               "}\n" +
-               "evaluate();";
-    }
-
-    private String createExtractionStatement(PulseUpStream ups) {
-        return "vals['%s'] = _extract_%s();".formatted(
-                ups.getPath(),
-                ups.getPath().replace("/", "_")
+    private List<PulseUpStream> generateUpstreams(PulseAlarm alarm) {
+        var channelOrMeasurePaths = alarmJsCodeGenerator.enumerateReferencedPaths(
+                alarm.getEngageCondition(),
+                alarm.getDisengageCondition()
         );
+
+
+        return new ArrayList<>(channelOrMeasurePaths.stream().map(path -> {
+            PulseSourceType sourceType;
+            if(channelsCrudService.findByPath(path).isPresent()) {
+                sourceType = PulseSourceType.CHANNEL;
+            } else if (measuresCrudService.findByPath(path).isPresent()) {
+                sourceType = PulseSourceType.MEASURE;
+            } else {
+                throw new IllegalArgumentException("Upstream path not found in channels or measures: " + path);
+            }
+
+            return PulseUpStream.builder()
+                    .path(path)
+                    .sourceType(sourceType)
+                    .lookBackMillis(Math.max(alarm.getEngageDuration(), alarm.getDisengageDuration()))
+                    .build();
+        }).toList());
     }
 
-    private String createExtractionFunction(PulseUpStream ups) {
-        var dataType = switch (ups.getSourceType()) {
-            case CHANNEL -> channelsCrudService.findByPath(ups.getPath())
-                    .orElseThrow(() -> new IllegalArgumentException("Channel not found: " + ups.getPath()))
-                    .getDataType();
-            case MEASURE -> measuresCrudService.findByPath(ups.getPath())
-                    .orElseThrow(() -> new IllegalArgumentException("Measure not found: " + ups.getPath()))
-                    .getDataType();
-        };
+    private String generateAlarmConditionScript(PulseAlarm alarm, List<PulseUpStream> upStreams) {
 
-        return """
-                function _extract_%s() {
-                    const allVals = parser.to%s("%s", %s);
-                    const lastVal = allVals.at(-1);
-                    return lastVal;
-                }
-                """.formatted(
-                ups.getPath().replace("/", "_"),
-                switch (dataType) {
-                    case BOOLEAN -> "Booleans";
-                    case LONG, DOUBLE -> "Numbers";
-                    case STRING -> "Strings";
-                },
-                ups.getPath(),
-                switch (dataType) {
-                    case BOOLEAN -> "true";
-                    case LONG, DOUBLE -> "0.0";
-                    case STRING -> "\"\"";
-                });
+        return alarmJsCodeGenerator.generate(
+                alarm.getEngageCondition(),
+                alarm.getEngageDuration(),
+                alarm.getDisengageCondition(),
+                alarm.getDisengageDuration(),
+                upStreams
+        );
 
     }
+
 }

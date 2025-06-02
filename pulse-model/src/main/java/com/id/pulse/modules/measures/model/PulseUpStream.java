@@ -18,6 +18,6 @@ public class PulseUpStream {
     private PulseSourceType sourceType = PulseSourceType.CHANNEL;
 
     @Builder.Default
-    private Long bufferLen = 0L;
+    private Long lookBackMillis = 0L;
 
 }

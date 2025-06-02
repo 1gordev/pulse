@@ -33,7 +33,7 @@ class MeasureJsEvaluatorTest {
                     pts.length === 1 ? pts[0] : -1;
                 """;
 
-        var value = evaluator.evaluate(script, parser, "single_thread_test");
+        var value = evaluator.evaluate(1000L, script, parser, 0d, "single_thread_test");
 
         assertInstanceOf(Double.class, value.getResult(), "Result should be a Double");
         assertEquals(40.0, value.getResult(), "Result should be 40.0");
@@ -64,7 +64,7 @@ class MeasureJsEvaluatorTest {
                      execute();
                 """;
 
-        var value = evaluator.evaluate(script, parser, "single_thread_test");
+        var value = evaluator.evaluate(1000L, script, parser, 0d, "single_thread_test");
 
         assertInstanceOf(Double.class, value.getResult(), "Result should be a Double");
         assertEquals(40.0, value.getResult(), "Result should be 40.0");
@@ -89,7 +89,7 @@ class MeasureJsEvaluatorTest {
                 """;
 
         // The evaluator should throw a ScriptEvaluationException (as per your previous implementation)
-        var evalResult = evaluator.evaluate(script, parser, "syntax_error_test");
+        var evalResult = evaluator.evaluate(1000L, script, parser, 0d, "syntax_error_test");
         boolean hasError = evalResult.getLogOutput().stream().anyMatch(log -> log.toLowerCase(Locale.ROOT).contains("error"));
 
         assertTrue(hasError, "Error message should mention syntax or parse error");
@@ -122,7 +122,7 @@ class MeasureJsEvaluatorTest {
                         pts.length === 1 ? pts[0] : -1;
                         """;
 
-                return evaluator.evaluate(script, parser, "multi_thread_test_" + idx).getResult();
+                return evaluator.evaluate(1000L, script, parser, 0d, "multi_thread_test_" + idx).getResult();
             });
         }
 
@@ -161,7 +161,7 @@ class MeasureJsEvaluatorTest {
                             // Commented console logs for speed
                             pts.length === 1 ? pts[0] : -1;
                             """;
-                    return evaluator.evaluate(script, parser, "multi_thread_test_" + idx).getResult();
+                    return evaluator.evaluate(1000L, script, parser, 0d, "multi_thread_test_" + idx).getResult();
                 });
             }
 

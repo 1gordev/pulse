@@ -25,7 +25,21 @@ public class MeasureJsEvaluator {
      *
      * @return The result of the script evaluation. If the script returns null, this method will return null.
      */
-    public ScriptEvaluatorResult evaluate(String script, PulseDataMatrixParser matrixParser, String logContext) {
+    public ScriptEvaluatorResult evaluate(Long evalMoment,
+                                          String script,
+                                          PulseDataMatrixParser matrixParser,
+                                          Object currentValue,
+                                          String logContext) {
+
+        if (evalMoment == null || evalMoment <= 0) {
+            throw new ScriptEvaluationException("Evaluation moment cannot be null or negative or zero", null);
+        }
+        if (script == null || script.isBlank()) {
+            throw new ScriptEvaluationException("Script cannot be null or empty", null);
+        }
+        if (matrixParser == null) {
+            throw new ScriptEvaluationException("Matrix parser cannot be null", null);
+        }
 
         // Restrict available classes for Java.type (even stricter)
         Predicate<String> classWhitelist = className ->
@@ -40,6 +54,8 @@ public class MeasureJsEvaluator {
 
             // Make the parser available as "parser"
             Value jsBindings = context.getBindings(JS);
+            jsBindings.putMember("_current", currentValue);
+            jsBindings.putMember("_t_eval", evalMoment);
             jsBindings.putMember("_parser", matrixParser);
             jsBindings.putMember("console", logConsole);
 
@@ -51,7 +67,7 @@ public class MeasureJsEvaluator {
                     .logOutput(logConsole.getLogBuffer())
                     .build();
         } catch (PolyglotException e) {
-            if(e.getMessage() != null && !e.getMessage().isBlank()) {
+            if (e.getMessage() != null && !e.getMessage().isBlank()) {
                 Arrays.stream(e.getMessage().split("\n")).forEach(logConsole::error);
             }
             logConsole.error("Error evaluating JS script", e);

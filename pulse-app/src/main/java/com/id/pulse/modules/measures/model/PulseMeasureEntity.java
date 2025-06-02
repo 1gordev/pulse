@@ -20,16 +20,17 @@ import java.util.Map;
 @Document(collection = "PulseMeasure")
 public class PulseMeasureEntity {
 
-    public static final String ID = "ID";
-    public static final String PATH = "PATH";
-    public static final String UPSTREAMS = "UPSTREAMS";
-    public static final String DESCRIPTION = "DESCRIPTION";
-    public static final String UNIT_OF_MEASURE_CODE = "UNIT_OF_MEASURE_CODE";
-    public static final String DATA_TYPE = "DATA_TYPE";
-    public static final String VALIDITY = "VALIDITY";
-    public static final String PRECISION = "PRECISION";
-    public static final String TRANSFORM_TYPE = "TRANSFORM_TYPE";
-    public static final String DETAILS = "DETAILS";
+    public static final String ID = "id";
+    public static final String PATH = "path";
+    public static final String UPSTREAMS = "upstreams";
+    public static final String DESCRIPTION = "description";
+    public static final String UNIT_OF_MEASURE_CODE = "unitOfMeasureCode";
+    public static final String DATA_TYPE = "dataType";
+    public static final String VALIDITY = "validity";
+    public static final String PRECISION = "precision";
+    public static final String TRANSFORM_TYPE = "transformType";
+    public static final String DETAILS = "details";
+
 
     @Id
     private String id;

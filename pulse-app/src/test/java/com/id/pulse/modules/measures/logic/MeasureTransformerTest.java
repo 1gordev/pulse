@@ -10,8 +10,10 @@ import com.id.pulse.modules.measures.model.enums.PulseTransformType;
 import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.pulse.modules.measures.model.TransformerRun;
 import com.id.pulse.modules.measures.service.MeasureTransformer;
+import com.id.pulse.modules.poller.service.LatestValuesBucket;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
 import com.id.pulse.modules.timeseries.model.PulseIngestorWriteResult;
+import com.mongodb.internal.selector.LatencyMinimizingServerSelector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
@@ -32,6 +34,8 @@ class MeasureTransformerTest {
     private MeasuresCrudService measuresCrudService;
     @Mock
     private DataIngestor dataIngestor;
+    @Mock
+    private LatestValuesBucket latestValuesBucket;
     @InjectMocks
     private MeasureTransformer measureTransformer;
 

@@ -24,9 +24,6 @@ public class PulseAlarm {
     private String description = "";
 
     @Builder.Default
-    private List<PulseUpStream> upstreams = new ArrayList<>();
-
-    @Builder.Default
     private String targetMeasurePath = "";
 
     @Builder.Default
@@ -36,7 +33,10 @@ public class PulseAlarm {
     private Long disengageDuration = 0L;
 
     @Builder.Default
-    private String condition = "";
+    private String engageCondition = "";
+
+    @Builder.Default
+    private String disengageCondition = "";
 
     @Builder.Default
     private Map<String, Object> details = new HashMap<>();

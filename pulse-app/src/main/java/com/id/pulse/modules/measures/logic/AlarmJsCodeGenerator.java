@@ -21,34 +21,36 @@ public class AlarmJsCodeGenerator {
 
     private final ChannelsCrudService channelsCrudService;
     private final MeasuresCrudService measuresCrudService;
+    private final Pattern pathPattern = Pattern.compile("\\{\\{\\s*([^}]+?)\\s*}}");
 
     public AlarmJsCodeGenerator(ChannelsCrudService channelsCrudService, MeasuresCrudService measuresCrudService) {
         this.channelsCrudService = channelsCrudService;
         this.measuresCrudService = measuresCrudService;
     }
 
-    public String interpolate(String targetMeasurePath, String engageCondition, String disengageCondition, List<PulseUpStream> upstreams) {
-        // Null or blank disengageCondition: invert engage
-        boolean hasDisengage = disengageCondition != null && !disengageCondition.isBlank();
-        String usedDisengage = hasDisengage ? disengageCondition : "!(" + engageCondition + ")";
+    public String generate(
+            String engageCondition,
+            Long engageDuration,
+            String disengageCondition,
+            Long disengageDuration,
+            List<PulseUpStream> upstreams) {
 
-        // --- Find types for referenced paths (both engage & disengage) ---
-        final Pattern pathPattern = Pattern.compile("\\{\\{\\s*([^}]+?)\\s*}}");
-        LinkedHashSet<String> referencedPaths = new LinkedHashSet<>();
-
-        // Extract referenced paths from both conditions
-        for (String cond : List.of(engageCondition, usedDisengage)) {
-            Matcher matcher = pathPattern.matcher(cond);
-            while (matcher.find()) {
-                referencedPaths.add(matcher.group(1).trim());
-            }
+        if (engageCondition == null || engageCondition.isBlank()) {
+            throw new IllegalArgumentException("Engage condition cannot be null or blank");
+        }
+        if (engageDuration == null || engageDuration <= 0) {
+            throw new IllegalArgumentException("Engage duration must be a positive number");
         }
 
-        // Also add the target measure path (for _current)
-        referencedPaths.add(targetMeasurePath);
+        // Null or blank disengageCondition: invert engage
+        boolean hasDisengage = disengageCondition != null && !disengageCondition.isBlank();
+        disengageCondition = hasDisengage ? disengageCondition : "!(" + engageCondition + ")";
+        disengageDuration = hasDisengage ? disengageDuration : engageDuration;
+
+        // Find all referenced paths
+        List<String> referencedPaths = enumerateReferencedPaths(engageCondition, disengageCondition);
 
         // Get all unique upstreams plus target (target always treated as a measure)
-        List<String> upstreamPaths = upstreams.stream().map(PulseUpStream::getPath).toList();
         var channelsMap = channelsCrudService.findByPaths(
                 upstreams.stream()
                         .filter(up -> up.getSourceType() == PulseSourceType.CHANNEL)
@@ -62,11 +64,6 @@ public class AlarmJsCodeGenerator {
                         .map(PulseUpStream::getPath)
                         .toList()
         ).stream().collect(Collectors.toMap(PulseMeasure::getPath, m -> m));
-
-        // Add the target as a (boolean) measure if not already present
-        if (!measuresMap.containsKey(targetMeasurePath)) {
-            measuresMap.put(targetMeasurePath, PulseMeasure.builder().path(targetMeasurePath).dataType(PulseDataType.BOOLEAN).build());
-        }
 
         // --- Map each path to its value type (number, boolean, string) ---
         Map<String, PulseDataType> pathTypeMap = new HashMap<>();
@@ -83,23 +80,18 @@ public class AlarmJsCodeGenerator {
                 }
             }
         }
-        // The target measure is always boolean
-        pathTypeMap.put(targetMeasurePath, PulseDataType.BOOLEAN);
 
         // --- Build JS stub ---
         StringBuilder jsStub = new StringBuilder();
         jsStub.append("// [AlarmJsCodeGenerator]\n");
-        // Paths array (for merged timestamps, ignore target)
-        var refPathsForTimestamps = referencedPaths.stream()
-                .filter(p -> !p.equals(targetMeasurePath))
-                .toList();
+
         jsStub.append("const _paths = [")
-                .append(refPathsForTimestamps.stream().map(p -> "'" + p + "'").collect(Collectors.joining(",")))
+                .append(referencedPaths.stream().map(p -> "'" + p + "'").collect(Collectors.joining(",")))
                 .append("];\n");
         jsStub.append("const _timestamps = _parser.toMergedTimestamps(_paths);\n");
 
         // For each path, create the aligned value array (skip target)
-        for (String path : refPathsForTimestamps) {
+        for (String path : referencedPaths) {
             PulseDataType type = pathTypeMap.getOrDefault(path, PulseDataType.DOUBLE); // default to DOUBLE
             String varName = "_v_" + toJsSafeVar(path);
             String jsArrayCode = switch (type) {
@@ -110,24 +102,25 @@ public class AlarmJsCodeGenerator {
             jsStub.append("const ").append(varName).append(" = ").append(jsArrayCode).append(";\n");
         }
 
-        // Latest value of the target measure
-        jsStub.append("const _current = _parser.toLatestBoolean('").append(targetMeasurePath).append("', false);\n");
-
         // --- Rewrite conditions ---
-        String jsEngage = rewriteCondition(engageCondition, pathPattern, referencedPaths, targetMeasurePath);
-        String jsDisengage = rewriteCondition(usedDisengage, pathPattern, referencedPaths, targetMeasurePath);
+        String jsEngage = rewriteCondition(engageCondition, pathPattern);
+        String jsDisengage = rewriteCondition(disengageCondition, pathPattern);
 
-        // --- JS evaluation functions ---
+        // --- JS evaluation functions with time window ---
         jsStub.append("function evaluateEngage() {\n")
                 .append("  for (let idx = 0; idx < _timestamps.length; idx++) {\n")
-                .append("    if (!(").append(jsEngage).append(")) return false;\n")
+                .append("    if (_timestamps[idx] >= (_t_eval - ").append(engageDuration).append(") && _timestamps[idx] <= _t_eval) {\n")
+                .append("      if (!(").append(jsEngage).append(")) return false;\n")
+                .append("    }\n")
                 .append("  }\n")
                 .append("  return true;\n")
                 .append("}\n");
 
         jsStub.append("function evaluateDisengage() {\n")
                 .append("  for (let idx = 0; idx < _timestamps.length; idx++) {\n")
-                .append("    if (!(").append(jsDisengage).append(")) return false;\n")
+                .append("    if (_timestamps[idx] >= (_t_eval - ").append(disengageDuration).append(") && _timestamps[idx] <= _t_eval) {\n")
+                .append("      if (!(").append(jsDisengage).append(")) return false;\n")
+                .append("    }\n")
                 .append("  }\n")
                 .append("  return true;\n")
                 .append("}\n");
@@ -147,7 +140,7 @@ public class AlarmJsCodeGenerator {
     /**
      * Converts a path to a JS-safe variable name
      */
-    private String toJsSafeVar(String path) {
+    private static String toJsSafeVar(String path) {
         return path.replaceAll("[^A-Za-z0-9_]", "_");
     }
 
@@ -155,20 +148,30 @@ public class AlarmJsCodeGenerator {
      * Rewrites the condition string, replacing {{ path }} with the JS-safe variable usage.
      * Target measure is never replaced, so we can keep logic simple.
      */
-    private String rewriteCondition(String condition, Pattern pattern, Set<String> referencedPaths, String targetMeasurePath) {
+    private static String rewriteCondition(String condition, Pattern pattern) {
         Matcher matcher = pattern.matcher(condition);
         StringBuilder sb = new StringBuilder();
         while (matcher.find()) {
             String rawPath = matcher.group(1).trim();
-            // Don't rewrite targetMeasurePath (should never be referenced, but just in case)
-            if (rawPath.equals(targetMeasurePath)) {
-                matcher.appendReplacement(sb, rawPath);
-            } else {
-                String safeVar = "_v_" + toJsSafeVar(rawPath) + "[idx]";
-                matcher.appendReplacement(sb, safeVar);
-            }
+            String safeVar = "_v_" + toJsSafeVar(rawPath) + "[idx]";
+            matcher.appendReplacement(sb, safeVar);
         }
         matcher.appendTail(sb);
         return sb.toString();
+    }
+
+    public List<String> enumerateReferencedPaths(String engageCondition, String disengageCondition) {
+        // Null or blank disengageCondition: invert engage
+        boolean hasDisengage = disengageCondition != null && !disengageCondition.isBlank();
+        String usedDisengage = hasDisengage ? disengageCondition : "!(" + engageCondition + ")";
+
+        LinkedHashSet<String> referencedPaths = new LinkedHashSet<>();
+        for (String cond : List.of(engageCondition, usedDisengage)) {
+            Matcher matcher = pathPattern.matcher(cond);
+            while (matcher.find()) {
+                referencedPaths.add(matcher.group(1).trim());
+            }
+        }
+        return new ArrayList<>(referencedPaths);
     }
 }

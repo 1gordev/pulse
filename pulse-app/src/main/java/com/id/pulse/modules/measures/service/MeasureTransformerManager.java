@@ -80,7 +80,7 @@ public class MeasureTransformerManager {
         }
     }
 
-    public PulseTestMeasureTransformRes testTransform(String measurePath, String script, Map<String, Object> testData) {
-        return appCtx.getBean(MeasureTransformer.class).testScript(PulseTransformType.JAVASCRIPT, measurePath, script, testData);
+    public PulseTestMeasureTransformRes testTransform(String measurePath, String script, Object currentValue, Map<String, Object> testData) {
+        return appCtx.getBean(MeasureTransformer.class).testScript(PulseTransformType.JAVASCRIPT, measurePath, script, currentValue, testData);
     }
 }

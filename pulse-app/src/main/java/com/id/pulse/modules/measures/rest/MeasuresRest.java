@@ -79,6 +79,6 @@ public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
     @PostMapping("test-measure-transform")
     @JwtSecured
     public ResponseEntity<PulseTestMeasureTransformRes> testMeasureTransform(@RequestBody PulseTestMeasureTransformReq req) {
-        return ResponseEntity.ok(measureTransformerManager.testTransform(req.getMeasurePath(), req.getScript(), req.getTestData()));
+        return ResponseEntity.ok(measureTransformerManager.testTransform(req.getMeasurePath(), req.getScript(), req.getCurrentValue(), req.getTestData()));
     }
 }

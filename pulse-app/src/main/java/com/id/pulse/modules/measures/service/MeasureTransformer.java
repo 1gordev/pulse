@@ -11,14 +11,12 @@ import com.id.pulse.modules.measures.model.PulseUpStream;
 import com.id.pulse.modules.measures.model.enums.PulseSourceType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
 import com.id.pulse.modules.parser.PulseDataMatrixParser;
+import com.id.pulse.modules.poller.service.LatestValuesBucket;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
 import com.id.pulse.utils.PulseDataMatrixBuilder;
 import com.id.px3.utils.SafeConvert;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Scope;
-import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -26,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -36,6 +35,7 @@ public class MeasureTransformer {
 
     private static final int MAX_THREADS = 32;
     public static final String MEASURES_GROUP = "_MEASURES_";
+    public static final String DETAILS_ALARM_ID = "alarm_id";
 
     private final ConcurrentHashMap<String, PulseChunkMetadata> channelMetadata = new ConcurrentHashMap<>();
     private final DataIngestor dataIngestor;
@@ -45,18 +45,24 @@ public class MeasureTransformer {
             MAX_THREADS,
             Thread.ofVirtual().factory()
     );
+    private final LatestValuesBucket latestValuesBucket;
 
     @Autowired
-    public MeasureTransformer(MeasuresCrudService measuresCrudService, DataIngestor dataIngestor, MeasureJsEvaluator measureJsEvaluator) {
+    public MeasureTransformer(MeasuresCrudService measuresCrudService,
+                              DataIngestor dataIngestor,
+                              MeasureJsEvaluator measureJsEvaluator,
+                              LatestValuesBucket latestValuesBucket) {
         this.measuresCrudService = measuresCrudService;
         this.dataIngestor = dataIngestor;
         this.measureJsEvaluator = measureJsEvaluator;
+        this.latestValuesBucket = latestValuesBucket;
     }
 
     public List<PulseDataPoint> execute(TransformerRun run) {
         Map<String, PulseMeasure> measureMap = measuresCrudService.findAll().stream()
                 .collect(Collectors.toMap(PulseMeasure::getPath, Function.identity()));
 
+        // TODO: upstream should load valuse considering run.getTms()
         // Get latest values for channels
         Map<String, PulseDataPoint> channelValues = getLatestValues(run.getChannelUpStreams());
 
@@ -65,8 +71,14 @@ public class MeasureTransformer {
         List<PulseMeasure> measures = buildOrderListResult.measures();
         Map<String, Set<String>> origDependencies = buildOrderListResult.origDeps();
 
+        // Load current values for all measures
+        var currentValues = measures.stream()
+                .map(m -> latestValuesBucket.readAsDataPoint(m.getPath()))
+                .filter(Objects::nonNull)
+                .toList();
+
         // Apply transformation logic on ordered measures with dependencies
-        List<PulseDataPoint> transformed = applyTransformations(measures, origDependencies, channelValues, run.getTms());
+        List<PulseDataPoint> transformed = applyTransformations(measures, currentValues, origDependencies, channelValues, run.getTms());
 
         // Persist
         publishToIngestor(transformed, run);
@@ -146,6 +158,7 @@ public class MeasureTransformer {
     public PulseTestMeasureTransformRes testScript(PulseTransformType scriptTransformType,
                                                    String measurePath,
                                                    String script,
+                                                   Object currentValue,
                                                    Map<String, Object> testData) {
         if (scriptTransformType != PulseTransformType.JAVASCRIPT) {
             throw new IllegalArgumentException("Only JAVASCRIPT transform type is supported for testing");
@@ -163,7 +176,9 @@ public class MeasureTransformer {
 
         // Build dependencies
         List<PulseDataPoint> deps = new ArrayList<>();
+        AtomicLong tms = new AtomicLong(1000L);
         testData.forEach((depPath, depPoints) -> {
+            tms.set(1000L);
             if (depPath == null || depPath.isEmpty()) {
                 throw new IllegalArgumentException("Dependency path is null or empty");
             }
@@ -172,26 +187,45 @@ public class MeasureTransformer {
             }
 
             // depPoints should be a collection of values
-            long tms = 1000L;
             if (depPoints instanceof Collection<?> collection) {
                 for (Object point : collection) {
                     deps.add(PulseDataPoint.builder()
                             .groupCode("test")
                             .path(depPath)
-                            .tms(tms)
+                            .tms(tms.get())
                             .type(detectTestPointType(point))
                             .val(point)
                             .build());
-                    tms += 1000L; // Increment timestamp for each point
+                    tms.set(tms.get() + 1000L); // Increment timestamp for each point
                 }
-            } else {
-                throw new IllegalArgumentException("Dependency points should be a collection");
             }
         });
 
+        PulseDataPoint currentDataPoint;
+        if(currentValue == null){
+            var dataType = measuresCrudService.findByPath(measurePath)
+                    .map(PulseMeasure::getDataType)
+                    .orElse(PulseDataType.DOUBLE);
+
+            currentDataPoint = PulseDataPoint.builder()
+                    .groupCode(MEASURES_GROUP)
+                    .path(measurePath)
+                    .tms(tms.get())
+                    .type(dataType)
+                    .val(getSafeValue(dataType))
+                    .build();
+        } else {
+            currentDataPoint = PulseDataPoint.builder()
+                    .groupCode(MEASURES_GROUP)
+                    .path(measurePath)
+                    .tms(tms.get())
+                    .type(detectTestPointType(currentValue))
+                    .val(currentValue)
+                    .build();
+        }
 
         AtomicReference<ScriptEvaluatorResult> evaluatorResult = new AtomicReference<>();
-        Object scriptResult = transformJavaScript(measure, deps, evaluatorResult);
+        Object scriptResult = transformJavaScript(tms.get(), measure, currentDataPoint, deps, evaluatorResult);
 
         return PulseTestMeasureTransformRes.builder()
                 .result(scriptResult)
@@ -297,6 +331,7 @@ public class MeasureTransformer {
 
     private List<PulseDataPoint> applyTransformations(
             List<PulseMeasure> measures,
+            List<PulseDataPoint> currentValues,
             Map<String, Set<String>> origDeps,
             Map<String, PulseDataPoint> channelValues,
             long tms) {
@@ -332,7 +367,31 @@ public class MeasureTransformer {
                         List<PulseDataPoint> allDeps = new ArrayList<>(channelDeps.size() + resolvedMeasureDeps.size());
                         allDeps.addAll(channelDeps);
                         allDeps.addAll(resolvedMeasureDeps);
-                        return transformMeasure(m, tms, allDeps);
+
+                        // Get current value for this measure
+                        PulseDataPoint currentDataPoint;
+                        if(currentValues != null) {
+                            currentDataPoint = currentValues.stream()
+                                    .filter(dp -> dp.getPath().equals(m.getPath()))
+                                    .findFirst()
+                                    .orElse(PulseDataPoint.builder()
+                                            .groupCode(MEASURES_GROUP)
+                                            .path(m.getPath())
+                                            .tms(tms)
+                                            .type(m.getDataType())
+                                            .val(getSafeValue(m.getDataType()))
+                                            .build());
+                        } else {
+                            currentDataPoint = PulseDataPoint.builder()
+                                    .groupCode(MEASURES_GROUP)
+                                    .path(m.getPath())
+                                    .tms(tms)
+                                    .type(m.getDataType())
+                                    .val(getSafeValue(m.getDataType()))
+                                    .build();
+                        }
+
+                        return transformMeasure(m, currentDataPoint, tms, allDeps);
                     }, executor);
 
             futures.put(m.getPath(), meFuture);
@@ -350,7 +409,7 @@ public class MeasureTransformer {
      * Performs the actual measure transformation. Override this stub
      * to fetch upstream values and apply PulseTransformType logic.
      */
-    private PulseDataPoint transformMeasure(PulseMeasure measure, long tms, List<PulseDataPoint> resolvedDeps) {
+    private PulseDataPoint transformMeasure(PulseMeasure measure, PulseDataPoint currentValue, long tms, List<PulseDataPoint> resolvedDeps) {
         try {
             log.trace("Transforming measure: {}", measure.getPath());
 
@@ -363,16 +422,21 @@ public class MeasureTransformer {
                     case MAX_LATEST -> transformMaxLatest(measure.getDataType(), resolvedDeps);
                     case SUM_LATEST -> transformSumLatest(measure.getDataType(), resolvedDeps);
                     case AVG_LATEST -> transformAvgLatest(measure.getDataType(), resolvedDeps);
-                    case JAVASCRIPT -> transformJavaScript(measure, resolvedDeps, null);
+                    case JAVASCRIPT -> transformJavaScript(tms, measure, currentValue, resolvedDeps, null);
                 };
             } else if (measure.getTransformType() == PulseTransformType.JAVASCRIPT) {
                 // Javascript transformations are always applied
-                val = transformJavaScript(measure, resolvedDeps, null);
+                val = transformJavaScript(tms, measure, currentValue, resolvedDeps, null);
             }
 
             // Cast to the correct type
             if (!val.getClass().equals(safeVal.getClass())) {
                 val = castToType(val, safeVal, measure.getDataType());
+            }
+
+            // Handle alarm transitions
+            if(isAlarm(measure)) {
+                handleAlarmTransition(measure, tms, currentValue, val);
             }
 
             return PulseDataPoint.builder()
@@ -392,6 +456,22 @@ public class MeasureTransformer {
                     .val(getSafeValue(measure.getDataType()))
                     .build();
         }
+    }
+
+    private void handleAlarmTransition(PulseMeasure measure, long tms, PulseDataPoint currentValue, Object val) {
+        if(currentValue.getVal() instanceof Boolean && val instanceof Boolean) {
+            if(!currentValue.getVal().equals(val)) {
+                // Get alarm ID from measure details
+                String alarmId = measure.getDetails().get(DETAILS_ALARM_ID).toString();
+                if(alarmId != null && !alarmId.isBlank()) {
+                    //
+                }
+            }
+        }
+    }
+
+    private boolean isAlarm(PulseMeasure measure) {
+        return measure.getDetails().containsKey(DETAILS_ALARM_ID);
     }
 
     private Object castToType(Object val, Object safeVal, PulseDataType dataType) {
@@ -489,7 +569,11 @@ public class MeasureTransformer {
         };
     }
 
-    private Object transformJavaScript(PulseMeasure m, List<PulseDataPoint> deps, AtomicReference<ScriptEvaluatorResult> rawResult) {
+    private Object transformJavaScript(Long tsEval,
+                                       PulseMeasure m,
+                                       PulseDataPoint currentValue,
+                                       List<PulseDataPoint> deps,
+                                       AtomicReference<ScriptEvaluatorResult> rawResult) {
 
         // Extract script from measure details
         String script = m.getDetails() != null && m.getDetails().containsKey("js_script")
@@ -506,7 +590,11 @@ public class MeasureTransformer {
             var dataMatrix = new PulseDataMatrixBuilder().addSparsePoints(deps).build();
 
             // Evaluate
-            var jsResult = measureJsEvaluator.evaluate(script, PulseDataMatrixParser.from(dataMatrix), "Measure '%s'".formatted(m.getPath()));
+            var jsResult = measureJsEvaluator.evaluate(tsEval,
+                    script,
+                    PulseDataMatrixParser.from(dataMatrix),
+                    currentValue.getVal(),
+                    "Measure '%s'".formatted(m.getPath()));
             if (rawResult != null) {
                 rawResult.set(jsResult);
             }
