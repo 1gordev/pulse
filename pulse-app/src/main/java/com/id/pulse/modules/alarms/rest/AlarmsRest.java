@@ -19,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("pulse-alarms")
@@ -72,4 +73,11 @@ public class AlarmsRest extends PxRestCrudBase<PulseAlarm, String> {
     public ResponseEntity<List<PulseAlarm>> findAllReferringPhysicalAsset(String physicalAssetId) {
         return ResponseEntity.ok(alarmsCrudService.findAllReferringPhysicalAsset(physicalAssetId));
     }
+
+    @PostMapping("find-by-path")
+    @JwtSecured
+    public ResponseEntity<PulseAlarm> findByPath(@RequestBody Map<String, String> path) {
+        return ResponseEntity.ok(alarmsCrudService.findByPath(path.get("path")).orElse(null));
+    }
+
 }

@@ -19,15 +19,15 @@ import java.util.Map;
 @Document(collection = "PulseAlarm")
 public class PulseAlarmEntity {
 
-    public static final String ID = "ID";
-    public static final String PATH = "PATH";
-    public static final String DESCRIPTION = "DESCRIPTION";
-    public static final String TARGET_MEASURE_PATH = "TARGET_MEASURE_PATH";
-    public static final String ENGAGE_DURATION = "ENGAGE_DURATION";
-    public static final String DISENGAGE_DURATION = "DISENGAGE_DURATION";
-    public static final String ENGAGE_CONDITION = "ENGAGE_CONDITION";
-    public static final String DISENGAGE_CONDITION = "DISENGAGE_CONDITION";
-    public static final String DETAILS = "DETAILS";
+    public static final String ID = "id";
+    public static final String PATH = "path";
+    public static final String DESCRIPTION = "description";
+    public static final String TARGET_MEASURE_PATH = "targetMeasurePath";
+    public static final String ENGAGE_DURATION = "engageDuration";
+    public static final String DISENGAGE_DURATION = "disengageDuration";
+    public static final String ENGAGE_CONDITION = "engageCondition";
+    public static final String DISENGAGE_CONDITION = "disengageCondition";
+    public static final String DETAILS = "details";
 
     @Id
     private String id;

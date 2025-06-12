@@ -2,6 +2,8 @@ package com.id.pulse.modules.measures.service;
 
 import com.id.pulse.model.PulseDataPoint;
 import com.id.pulse.model.PulseTestMeasureTransformRes;
+import com.id.pulse.modules.alarms.PulseAlarm;
+import com.id.pulse.modules.alarms.service.AlarmsCrudService;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
 import com.id.pulse.modules.measures.model.ScriptEvaluatorResult;
@@ -37,6 +39,7 @@ public class MeasureTransformer {
     public static final String MEASURES_GROUP = "_MEASURES_";
     public static final String DETAILS_ALARM_ID = "alarm_id";
 
+    private final AlarmsCrudService alarmsCrudService;
     private final ConcurrentHashMap<String, PulseChunkMetadata> channelMetadata = new ConcurrentHashMap<>();
     private final DataIngestor dataIngestor;
     private final MeasuresCrudService measuresCrudService;
@@ -48,10 +51,12 @@ public class MeasureTransformer {
     private final LatestValuesBucket latestValuesBucket;
 
     @Autowired
-    public MeasureTransformer(MeasuresCrudService measuresCrudService,
+    public MeasureTransformer(AlarmsCrudService alarmsCrudService,
+                              MeasuresCrudService measuresCrudService,
                               DataIngestor dataIngestor,
                               MeasureJsEvaluator measureJsEvaluator,
                               LatestValuesBucket latestValuesBucket) {
+        this.alarmsCrudService = alarmsCrudService;
         this.measuresCrudService = measuresCrudService;
         this.dataIngestor = dataIngestor;
         this.measureJsEvaluator = measureJsEvaluator;
@@ -59,7 +64,7 @@ public class MeasureTransformer {
     }
 
     public List<PulseDataPoint> execute(TransformerRun run) {
-        Map<String, PulseMeasure> measureMap = measuresCrudService.findAll().stream()
+        Map<String, PulseMeasure> measuresMap = measuresCrudService.findAll().stream()
                 .collect(Collectors.toMap(PulseMeasure::getPath, Function.identity()));
 
         // TODO: upstream should load valuse considering run.getTms()
@@ -67,7 +72,7 @@ public class MeasureTransformer {
         Map<String, PulseDataPoint> channelValues = getLatestValues(run.getChannelUpStreams());
 
         // Build ordered list and get dependency map
-        BuildOrderListResult buildOrderListResult = buildOrderedList(measureMap, channelValues.keySet().stream().toList());
+        BuildOrderListResult buildOrderListResult = buildOrderedList(measuresMap, channelValues.keySet().stream().toList());
         List<PulseMeasure> measures = buildOrderListResult.measures();
         Map<String, Set<String>> origDependencies = buildOrderListResult.origDeps();
 
@@ -77,14 +82,96 @@ public class MeasureTransformer {
                 .filter(Objects::nonNull)
                 .toList();
 
+        // Make a map of current values indexed by measure path
+        Map<String, PulseDataPoint> currentValuesMap = currentValues.stream()
+                .collect(Collectors.toMap(PulseDataPoint::getPath, Function.identity()));
+
+        // Make a list of measure paths indexed by alarms
+        List<String> alarmTargetMeasurePaths = measures.stream()
+                .filter(m -> m.getDetails() != null && m.getDetails().containsKey(DETAILS_ALARM_ID))
+                .map(PulseMeasure::getPath)
+                .toList();
+
         // Apply transformation logic on ordered measures with dependencies
         List<PulseDataPoint> transformed = applyTransformations(measures, currentValues, origDependencies, channelValues, run.getTms());
+
+        // Make a map of transformed data points indexed by path
+        Map<String, PulseDataPoint> transformedMap = transformed.stream()
+                .collect(Collectors.toMap(PulseDataPoint::getPath, Function.identity()));
+
+        // Select alarms-linked measures which have changed
+        HashMap<String, Boolean> changedAlarmsByPath = extractChangedAlarmsMap(measuresMap, transformed, alarmTargetMeasurePaths, currentValuesMap, transformedMap);
+
+        // Publish changed alarms
+        publishChangedAlarms(changedAlarmsByPath, run.getTms());
 
         // Persist
         publishToIngestor(transformed, run);
 
         // Return transformed data points
         return transformed;
+    }
+
+    private void publishChangedAlarms(HashMap<String, Boolean> changedAlarmsByPath, long tms) {
+
+    }
+
+    private HashMap<String, Boolean> extractChangedAlarmsMap(Map<String, PulseMeasure> measuresMap,
+                                                             List<PulseDataPoint> transformed,
+                                                             List<String> alarmTargetMeasurePaths,
+                                                             Map<String, PulseDataPoint> currentValuesMap,
+                                                             Map<String, PulseDataPoint> transformedMap) {
+
+        // Load all alarms in a map
+        var alarmsMapById = alarmsCrudService.findAll().stream().collect(Collectors.toMap(PulseAlarm::getId, al -> al));
+
+        var changedAlarms = new HashMap<String, Boolean>();
+        transformed.stream()
+                .filter(dp -> alarmTargetMeasurePaths.contains(dp.getPath()))
+                .filter(dp -> {
+                    PulseDataPoint beforeTransform = currentValuesMap.get(dp.getPath());
+                    PulseDataPoint afterTransform = transformedMap.get(dp.getPath());
+
+                    // If both before and after are null, consider it unchanged
+                    if (beforeTransform == null && afterTransform == null) {
+                        return false;
+                    }
+
+                    // Extract the two values
+                    Object beforeValue = beforeTransform != null ? beforeTransform.getVal() : null;
+                    Object afterValue = afterTransform != null ? afterTransform.getVal() : null;
+
+                    // In case both values are null, consider it unchanged
+                    if (beforeValue == null && afterValue == null) {
+                        return false;
+                    }
+
+                    // If before is null, consider it changed (Note: afterValue cannot be null here)
+                    if (beforeValue == null) {
+                        return true;
+                    }
+
+                    // If after is null, consider it changed (Note: beforeValue cannot be null here)
+                    if (afterValue == null) {
+                        return true;
+                    }
+
+                    // If both values are not null, check if they are different
+                    return !beforeValue.equals(afterValue);
+                })
+                .forEach(dp -> {
+                    PulseMeasure measure = measuresMap.get(dp.getPath());
+                    if (measure != null && measure.getDetails() != null && measure.getDetails().containsKey(DETAILS_ALARM_ID)) {
+                        SafeConvert.toString(measure.getDetails().get(DETAILS_ALARM_ID)).ifPresent(alarmId -> {
+                            var alarm = alarmsMapById.get(alarmId);
+                            if (alarm != null) {
+                                changedAlarms.put(alarm.getPath(), SafeConvert.toBoolean(dp.getVal()).orElse(false));
+                            }
+                        });
+                    }
+                });
+
+        return changedAlarms;
     }
 
     private Map<String, PulseDataPoint> getLatestValues(List<PulseDataPoint> channelUpStreams) {
@@ -202,7 +289,7 @@ public class MeasureTransformer {
         });
 
         PulseDataPoint currentDataPoint;
-        if(currentValue == null){
+        if (currentValue == null) {
             var dataType = measuresCrudService.findByPath(measurePath)
                     .map(PulseMeasure::getDataType)
                     .orElse(PulseDataType.DOUBLE);
@@ -250,7 +337,8 @@ public class MeasureTransformer {
         };
     }
 
-    private BuildOrderListResult buildOrderedList(Map<String, PulseMeasure> measureMap, List<String> channelPaths) {
+    private BuildOrderListResult buildOrderedList
+            (Map<String, PulseMeasure> measureMap, List<String> channelPaths) {
         // Build inverse graphs
         Map<String, List<String>> channelChildren = new HashMap<>();
         Map<String, List<String>> measureChildren = new HashMap<>();
@@ -370,7 +458,7 @@ public class MeasureTransformer {
 
                         // Get current value for this measure
                         PulseDataPoint currentDataPoint;
-                        if(currentValues != null) {
+                        if (currentValues != null) {
                             currentDataPoint = currentValues.stream()
                                     .filter(dp -> dp.getPath().equals(m.getPath()))
                                     .findFirst()
@@ -409,7 +497,8 @@ public class MeasureTransformer {
      * Performs the actual measure transformation. Override this stub
      * to fetch upstream values and apply PulseTransformType logic.
      */
-    private PulseDataPoint transformMeasure(PulseMeasure measure, PulseDataPoint currentValue, long tms, List<PulseDataPoint> resolvedDeps) {
+    private PulseDataPoint transformMeasure(PulseMeasure measure, PulseDataPoint currentValue,
+                                            long tms, List<PulseDataPoint> resolvedDeps) {
         try {
             log.trace("Transforming measure: {}", measure.getPath());
 
@@ -435,7 +524,7 @@ public class MeasureTransformer {
             }
 
             // Handle alarm transitions
-            if(isAlarm(measure)) {
+            if (isAlarm(measure)) {
                 handleAlarmTransition(measure, tms, currentValue, val);
             }
 
@@ -458,13 +547,14 @@ public class MeasureTransformer {
         }
     }
 
-    private void handleAlarmTransition(PulseMeasure measure, long tms, PulseDataPoint currentValue, Object val) {
-        if(currentValue.getVal() instanceof Boolean && val instanceof Boolean) {
-            if(!currentValue.getVal().equals(val)) {
+    private void handleAlarmTransition(PulseMeasure measure, long tms, PulseDataPoint
+            currentValue, Object val) {
+        if (currentValue.getVal() instanceof Boolean && val instanceof Boolean) {
+            if (!currentValue.getVal().equals(val)) {
                 // Get alarm ID from measure details
                 String alarmId = measure.getDetails().get(DETAILS_ALARM_ID).toString();
-                if(alarmId != null && !alarmId.isBlank()) {
-                    //
+                if (alarmId != null && !alarmId.isBlank()) {
+
                 }
             }
         }

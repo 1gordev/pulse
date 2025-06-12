@@ -19,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("pulse-measures")
@@ -80,5 +81,11 @@ public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
     @JwtSecured
     public ResponseEntity<PulseTestMeasureTransformRes> testMeasureTransform(@RequestBody PulseTestMeasureTransformReq req) {
         return ResponseEntity.ok(measureTransformerManager.testTransform(req.getMeasurePath(), req.getScript(), req.getCurrentValue(), req.getTestData()));
+    }
+
+    @PostMapping("find-by-path")
+    @JwtSecured
+    public ResponseEntity<PulseMeasure> findByPath(@RequestBody Map<String, String> path) {
+        return ResponseEntity.ok(measuresCrudService.findByPath(path.get("path")).orElse(null));
     }
 }

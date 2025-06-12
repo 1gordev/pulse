@@ -16,11 +16,10 @@ import com.id.px3.rest.security.JwtSecured;
 import com.id.px3.rest.security.JwtService;
 import jakarta.validation.Validator;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("pulse-channels")
@@ -67,5 +66,11 @@ public class ChannelsRest extends PxRestCrudBase<PulseChannel, String> {
     @JwtSecured
     public ResponseEntity<PulseDataMatrix> getLatest() {
         return ResponseEntity.ok(latestValuesBucket.readAsMatrix());
+    }
+
+    @PostMapping("find-by-path")
+    @JwtSecured
+    public ResponseEntity<PulseChannel> findByPath(@RequestBody Map<String, String> path) {
+        return ResponseEntity.ok(channelsCrudService.findByPath(path.get("path")).orElse(null));
     }
 }
