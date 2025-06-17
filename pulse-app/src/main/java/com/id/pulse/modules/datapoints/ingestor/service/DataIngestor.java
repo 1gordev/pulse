@@ -92,8 +92,8 @@ public class DataIngestor {
         log.trace("Preparing DataIngestor for path:%s, type:%s, samplingRate:%d".formatted(path, type, samplingRate));
 
         // Clean and sanitize path and type
-        String safePath = path.replaceAll("\\s+", "").replaceAll("[^a-zA-Z0-9._-]", "_");
-        String safeType = type.name().replaceAll("\\s+", "").replaceAll("[^a-zA-Z0-9._-]", "_");
+        String safePath = path.replaceAll("\\s+", "").replaceAll("[^a-zA-Z0-9._-]", "__");
+        String safeType = type.name().replaceAll("\\s+", "").replaceAll("[^a-zA-Z0-9._-]", "__");
 
         // Generate collection name and ID
         String collectionName = "PulseChunks_%s_%s_%d".formatted(groupCode, safeType, samplingRate);
@@ -234,7 +234,7 @@ public class DataIngestor {
         };
 
         newChunk.setId(id);
-        newChunk.setPath(metadata.getSafePath());
+        newChunk.setPath(metadata.getPath());
         newChunk.setTsStart(tsStart);
         newChunk.setTsEnd(tsEnd);
         newChunk.setDataType(dataType);
