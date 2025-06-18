@@ -8,6 +8,8 @@ import com.id.pulse.modules.channel.service.ChannelGroupsCrudService;
 import com.id.pulse.modules.channel.service.ChannelsCrudService;
 import com.id.pulse.modules.datapoints.model.PulseChunk;
 import com.id.pulse.modules.datapoints.service.ChunkMetadataCrudService;
+import com.id.pulse.modules.measures.model.PulseMeasure;
+import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
 import com.id.pulse.utils.PulseDataMatrixBuilder;
 import com.id.px3.utils.ThrowingFn;
@@ -29,29 +31,34 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Component
 @Scope(BeanDefinition.SCOPE_PROTOTYPE)
 @Slf4j
 public class DataExtractorProcessor {
 
+    public static final String MEASURES_GROUP = "_MEASURES_";
+
     private final AppConfig appConfig;
     private final ChannelsCrudService channelsCrudService;
     private final ChannelGroupsCrudService channelGroupsCrudService;
     private final ChunkMetadataCrudService chunkMetadataCrudService;
+    private final MeasuresCrudService measuresCrudService;
     private final MongoTemplate mongoTemplate;
 
     public DataExtractorProcessor(AppConfig appConfig,
                                   ChannelsCrudService channelsCrudService,
                                   ChannelGroupsCrudService channelGroupsCrudService,
                                   ChunkMetadataCrudService chunkMetadataCrudService,
-                                  MongoClient mongoClient,
+                                  MongoClient mongoClient, MeasuresCrudService measuresCrudService,
                                   MongoTemplate mongoTemplate) {
 
         this.appConfig = appConfig;
         this.channelsCrudService = channelsCrudService;
         this.channelGroupsCrudService = channelGroupsCrudService;
         this.chunkMetadataCrudService = chunkMetadataCrudService;
+        this.measuresCrudService = measuresCrudService;
         this.mongoTemplate = mongoTemplate;
     }
 
@@ -62,31 +69,44 @@ public class DataExtractorProcessor {
 
         // Find channels and groups
         var channelsMap = channelsCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseChannel::getPath, ch -> ch));
-        var groupCodes = channelsMap.values().stream().map(PulseChannel::getChannelGroupCode).collect(Collectors.toSet());
-        var groupsMap = channelGroupsCrudService.findByCodes(new ArrayList<>(groupCodes)).stream().collect(Collectors.toMap(PulseChannelGroup::getCode, gr -> gr));
+        var channelGroupCodes = channelsMap.values().stream().map(PulseChannel::getChannelGroupCode).collect(Collectors.toSet());
+        var channelGroupsMap = channelGroupsCrudService.findByCodes(new ArrayList<>(channelGroupCodes)).stream().collect(Collectors.toMap(PulseChannelGroup::getCode, gr -> gr));
 
-        // Find metadata
+        // Find channels metadata
         var channelMetadataMap = chunkMetadataCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseChunkMetadata::getPath, meta -> meta));
 
         // Process group by group
-        List<CompletableFuture<PulseDataMatrix>> tasks;
+        List<CompletableFuture<PulseDataMatrix>> channelsTasks;
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            tasks = groupsMap.values().stream().map(gr ->
-                    CompletableFuture.supplyAsync(() -> extractGroup(gr, channelsMap, channelMetadataMap, tsReadStart, tsReadEnd), executor)
+            channelsTasks = channelGroupsMap.values().stream().map(gr ->
+                    CompletableFuture.supplyAsync(() -> extractChannelGroup(gr, channelsMap, channelMetadataMap, tsReadStart, tsReadEnd), executor)
             ).toList();
+        }
+
+        // Find measures and groups
+        var measuresMap = measuresCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseMeasure::getPath, ch -> ch));
+
+        // Find measures metadata
+        var measureMetadataMap = chunkMetadataCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseChunkMetadata::getPath, meta -> meta));
+
+        // Process group by group
+        CompletableFuture<PulseDataMatrix> measuresTask;
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            measuresTask = CompletableFuture.supplyAsync(() -> extractMeasureGroup(measuresMap, measureMetadataMap, tsReadStart, tsReadEnd), executor);
         }
 
         // Merge matrix
         return PulseDataMatrix.builder()
-                .addMatrices(tasks.stream().map(ThrowingFn.mayThrow(CompletableFuture::get)).toList())
+                .addMatrices(channelsTasks.stream().map(ThrowingFn.mayThrow(CompletableFuture::get)).toList())
+                .addMatrices(Stream.of(measuresTask).map(ThrowingFn.mayThrow(CompletableFuture::get)).toList())
                 .build();
     }
 
-    private PulseDataMatrix extractGroup(PulseChannelGroup gr,
-                                         Map<String, PulseChannel> channelsMap,
-                                         Map<String, PulseChunkMetadata> metaMap,
-                                         Instant tsReadStart,
-                                         Instant tsReadEnd) {
+    private PulseDataMatrix extractChannelGroup(PulseChannelGroup gr,
+                                                Map<String, PulseChannel> channelsMap,
+                                                Map<String, PulseChunkMetadata> metaMap,
+                                                Instant tsReadStart,
+                                                Instant tsReadEnd) {
         // Split the channels list into smaller batches (up to AppConfig.extractorReadThreads)
         // and process each batch in parallel
         List<CompletableFuture<PulseDataMatrix>> tasks = new ArrayList<>();
@@ -94,7 +114,7 @@ public class DataExtractorProcessor {
             int batchEnd = Math.min(batchStart + appConfig.getExtractorReadThreads(), channelsMap.size());
             List<PulseChannel> channelsBatch = new ArrayList<>(channelsMap.values()).subList(batchStart, batchEnd);
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                tasks.add(CompletableFuture.supplyAsync(() -> extractBatch(gr, channelsBatch, metaMap, tsReadStart, tsReadEnd), executor));
+                tasks.add(CompletableFuture.supplyAsync(() -> extractChannelBatch(gr, channelsBatch, metaMap, tsReadStart, tsReadEnd), executor));
             }
         }
         return PulseDataMatrix.builder()
@@ -102,11 +122,30 @@ public class DataExtractorProcessor {
                 .build();
     }
 
-    private PulseDataMatrix extractBatch(PulseChannelGroup gr,
-                                         List<PulseChannel> channelsBatch,
-                                         Map<String, PulseChunkMetadata> metaMap,
-                                         Instant tsReadStart,
-                                         Instant tsReadEnd) {
+    private PulseDataMatrix extractMeasureGroup(Map<String, PulseMeasure> measuresMap,
+                                                Map<String, PulseChunkMetadata> metaMap,
+                                                Instant tsReadStart,
+                                                Instant tsReadEnd) {
+        // Split the measures list into smaller batches (up to AppConfig.extractorReadThreads)
+        // and process each batch in parallel
+        List<CompletableFuture<PulseDataMatrix>> tasks = new ArrayList<>();
+        for (int batchStart = 0; batchStart < measuresMap.size(); batchStart += appConfig.getExtractorReadThreads()) {
+            int batchEnd = Math.min(batchStart + appConfig.getExtractorReadThreads(), measuresMap.size());
+            List<PulseMeasure> measuresBatch = new ArrayList<>(measuresMap.values()).subList(batchStart, batchEnd);
+            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                tasks.add(CompletableFuture.supplyAsync(() -> extractMeasureBatch(measuresBatch, metaMap, tsReadStart, tsReadEnd), executor));
+            }
+        }
+        return PulseDataMatrix.builder()
+                .addMatrices(tasks.stream().map(ThrowingFn.mayThrow(CompletableFuture::get)).toList())
+                .build();
+    }
+
+    private PulseDataMatrix extractChannelBatch(PulseChannelGroup gr,
+                                                List<PulseChannel> channelsBatch,
+                                                Map<String, PulseChunkMetadata> metaMap,
+                                                Instant tsReadStart,
+                                                Instant tsReadEnd) {
 
         long chunkMillis = gr.getInterval() * appConfig.getIngestorChunkSize();
         long tsReadStartMillis = tsReadStart.toEpochMilli();
@@ -127,7 +166,44 @@ public class DataExtractorProcessor {
                     .map(collectionName -> CompletableFuture.supplyAsync(() -> queryCollection(
                             gr.getCode(),
                             collectionName,
-                            channelsBatch,
+                            channelsBatch.stream().map(PulseChannel::getPath).collect(Collectors.toSet()),
+                            metaMap,
+                            tsReadStartNorm,
+                            tsReadEndNorm
+                    ), executor))
+                    .toList();
+
+            return PulseDataMatrix.builder()
+                    .addMatrices(tasks.stream().map(ThrowingFn.mayThrow(CompletableFuture::get)).toList())
+                    .build();
+        }
+    }
+
+    private PulseDataMatrix extractMeasureBatch(List<PulseMeasure> measuresBatch,
+                                                Map<String, PulseChunkMetadata> metaMap,
+                                                Instant tsReadStart,
+                                                Instant tsReadEnd) {
+
+        long chunkMillis = 1000L;
+        long tsReadStartMillis = tsReadStart.toEpochMilli();
+        long tsReadStartNorm = (tsReadStartMillis / chunkMillis) * chunkMillis;
+        long tsReadEndMillis = tsReadEnd.toEpochMilli();
+        long tsReadEndNorm = ((tsReadEndMillis + chunkMillis - 1) / chunkMillis) * chunkMillis;
+
+        // Get collections
+        var collections = measuresBatch.stream()
+                .map(ch -> metaMap.get(ch.getPath()))
+                .filter(Objects::nonNull)
+                .map(PulseChunkMetadata::getCollectionName)
+                .collect(Collectors.toSet());
+
+        // Query each collection
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<CompletableFuture<PulseDataMatrix>> tasks = collections.stream()
+                    .map(collectionName -> CompletableFuture.supplyAsync(() -> queryCollection(
+                            MEASURES_GROUP,
+                            collectionName,
+                            measuresBatch.stream().map(PulseMeasure::getPath).collect(Collectors.toSet()),
                             metaMap,
                             tsReadStartNorm,
                             tsReadEndNorm
@@ -142,7 +218,7 @@ public class DataExtractorProcessor {
 
     private PulseDataMatrix queryCollection(String groupCode,
                                             String collectionName,
-                                            List<PulseChannel> channelsBatch,
+                                            Set<String> paths,
                                             Map<String, PulseChunkMetadata> metaMap,
                                             long tsReadStartNorm,
                                             long tsReadEndNorm) {
@@ -152,7 +228,7 @@ public class DataExtractorProcessor {
         PulseDataMatrixBuilder matrixBuilder = PulseDataMatrix.builder();
 
         Bson query = Filters.and(
-                Filters.in(PulseChunk.PATH, channelsBatch.stream().map(PulseChannel::getPath).collect(Collectors.toSet())),
+                Filters.in(PulseChunk.PATH, paths),
                 Filters.gte(PulseChunk.TS_START, tsReadStartNorm),
                 Filters.lte(PulseChunk.TS_END, tsReadEndNorm)
         );
