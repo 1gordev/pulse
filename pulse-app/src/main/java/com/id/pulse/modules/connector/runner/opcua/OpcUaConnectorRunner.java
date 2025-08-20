@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.eclipse.milo.opcua.sdk.client.OpcUaClient;
 import org.eclipse.milo.opcua.sdk.client.nodes.UaNode;
 import org.eclipse.milo.opcua.stack.core.NodeIds;
+import org.eclipse.milo.opcua.stack.core.StatusCodes;
 import org.eclipse.milo.opcua.stack.core.UaException;
 import org.eclipse.milo.opcua.stack.core.types.builtin.DataValue;
 import org.eclipse.milo.opcua.stack.core.types.builtin.NodeId;
@@ -32,29 +33,63 @@ import java.util.concurrent.ConcurrentHashMap;
 public class OpcUaConnectorRunner implements IPulseConnectorRunner {
 
     private final ConcurrentHashMap<String, NodeId> nodeIdMap = new ConcurrentHashMap<>();
+    private volatile boolean running = false;
     private OpcUaClient opcUaClient;
+    private volatile Thread monitorThread;
+    private volatile String endpointUrl;
+    private volatile long reconnectSeconds;
 
     @Override
     public PulseConnectorStatus open(PulseConnector connector) {
-        try {
-            var endpointUrl = Optional.ofNullable(connector.getParams().get("endpointUrl")).map(Object::toString).orElse("");
-            log.debug("Connecting to OPC UA server at {}", endpointUrl);
-            opcUaClient = OpcUaClient.create(Optional.ofNullable(connector.getParams().get("endpointUrl")).map(Object::toString).orElse(""));
-            opcUaClient = opcUaClient.connect();
-            log.info("Connected to OPC UA server at {}", endpointUrl);
-            return PulseConnectorStatus.CONNECTED;
-        } catch (UaException e) {
-            log.error("Failed to connect to OPC UA server", e);
+        this.endpointUrl = Optional.ofNullable(connector.getParams().get("endpointUrl"))
+                .map(Object::toString)
+                .orElse("");
+        this.reconnectSeconds = SafeConvert.toLong(connector.getParams().getOrDefault("reconnectSeconds", 5)).orElse(5L);
+
+        running = true;
+        log.debug("Connecting to OPC UA server at {} (retry every {}s)", endpointUrl, reconnectSeconds);
+        while (running) {
+            try {
+                opcUaClient = OpcUaClient.create(endpointUrl);
+                opcUaClient = opcUaClient.connect();
+                log.info("Connected to OPC UA server at {}", endpointUrl);
+                startMonitorIfNeeded();
+                return PulseConnectorStatus.CONNECTED;
+            } catch (Exception e) {
+                // Any failure to connect should be handled gracefully
+                log.warn("OPC UA connection attempt failed. Will retry in {}s. Endpoint: {}", reconnectSeconds, endpointUrl, e);
+                // Ensure client reference is cleared on failure
+                opcUaClient = null;
+                try {
+                    long sleepMs = Math.max(1, reconnectSeconds) * 1000L;
+                    Thread.sleep(sleepMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.info("OPC UA connect retry loop interrupted");
+                    break;
+                }
+            }
         }
         return PulseConnectorStatus.FAILED;
     }
 
     @Override
     public PulseConnectorStatus close() {
+        running = false;
         try {
             log.debug("Closing OPC UA server");
-            opcUaClient.disconnect();
-            log.info("Disconnected from OPC UA server");
+            Thread t = monitorThread;
+            if (t != null) {
+                try {
+                    t.interrupt();
+                } catch (Exception ignored) {}
+            }
+            if (opcUaClient != null) {
+                opcUaClient.disconnect();
+                log.info("Disconnected from OPC UA server");
+            } else {
+                log.info("OPC UA client was not connected");
+            }
             return PulseConnectorStatus.IDLE;
         } catch (UaException e) {
             log.error("Failed to disconnect from OPC UA server", e);
@@ -62,11 +97,89 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
         return PulseConnectorStatus.FAILED;
     }
 
+    private void startMonitorIfNeeded() {
+        if (monitorThread != null && monitorThread.isAlive()) return;
+        monitorThread = new Thread(() -> {
+            while (running) {
+                try {
+                    if (opcUaClient == null) {
+                        try {
+                            OpcUaClient client = OpcUaClient.create(endpointUrl);
+                            client = client.connect();
+                            opcUaClient = client;
+                            log.info("Reconnected to OPC UA server at {}", endpointUrl);
+                        } catch (Exception e) {
+                            log.warn("Reconnection attempt failed. Will retry in {}s. Endpoint: {}", reconnectSeconds, endpointUrl, e);
+                            sleepSilently(Math.max(1, reconnectSeconds) * 1000L);
+                        }
+                        continue;
+                    }
+
+                    // Health check: light browse to detect connection loss
+                    try {
+                        opcUaClient.getAddressSpace().browseNodes(NodeIds.RootFolder);
+                    } catch (Exception e) {
+                        log.warn("OPC UA connection lost or unhealthy. Will attempt to reconnect.", e);
+                        safeDisconnect();
+                        opcUaClient = null;
+                        sleepSilently(Math.max(1, reconnectSeconds) * 1000L);
+                        continue;
+                    }
+
+                    // Sleep before next health check
+                    sleepSilently(Math.max(1, reconnectSeconds) * 1000L);
+                } catch (Throwable t) {
+                    log.error("Unexpected error in OPC UA monitor thread", t);
+                    sleepSilently(1000L);
+                }
+            }
+        }, "OpcUa-Connector-Monitor");
+        monitorThread.setDaemon(true);
+        monitorThread.start();
+    }
+
+    private void safeDisconnect() {
+        try {
+            if (opcUaClient != null) {
+                opcUaClient.disconnect();
+            }
+        } catch (Exception e) {
+            log.debug("Ignoring exception during disconnect: {}", e.getMessage());
+        }
+    }
+
+    private void sleepSilently(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean isConnectionClosed(UaException e) {
+        try {
+            if (e == null || e.getStatusCode() == null) return false;
+            long code = e.getStatusCode().getValue();
+            return code == StatusCodes.Bad_ConnectionClosed
+                    || code == StatusCodes.Bad_SessionClosed
+                    || code == StatusCodes.Bad_SecureChannelClosed
+                    || code == StatusCodes.Bad_NotConnected
+                    || code == StatusCodes.Bad_SessionIdInvalid;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     public CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap) {
         return CompletableFuture.supplyAsync(() -> {
 
             var dataPoints = new ArrayList<PulseDataPoint>();
+
+            if (opcUaClient == null) {
+                log.warn("OPC UA client is not connected. Query will return no data.");
+                return dataPoints;
+            }
 
             channelsMap.forEach((group, channels) -> {
                 // Find NodeId for channels
@@ -102,6 +215,11 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
 
                                 } catch (UaException e) {
                                     log.error("Error reading value for channel '%s' in group '%s'".formatted(channel.getPath(), group.getCode()), e);
+                                    if (isConnectionClosed(e)) {
+                                        log.warn("Detected OPC UA connection closed during read. Marking client as disconnected to trigger reconnect.");
+                                        safeDisconnect();
+                                        opcUaClient = null;
+                                    }
                                 }
                             }
                         }
@@ -132,6 +250,9 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
         if (sourcePath == null || sourcePath.isEmpty()) {
             return null;
         }
+        if (client == null) {
+            return null;
+        }
         // Remove leading slash if present, then split into segments
         String trimmed = sourcePath.startsWith("/")
                 ? sourcePath.substring(1)
@@ -149,6 +270,10 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
         // If we’ve consumed all segments, currentRoot is our target
         if (index >= segments.length) {
             return currentRoot;
+        }
+
+        if (client == null) {
+            return null;
         }
 
         String segment = segments[index];

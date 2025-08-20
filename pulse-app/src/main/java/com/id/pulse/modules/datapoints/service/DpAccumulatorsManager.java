@@ -45,7 +45,13 @@ public class DpAccumulatorsManager {
             throw new IllegalArgumentException("Path cannot be null");
         }
 
-        return accumulators.values().stream()
+        // Take a snapshot of the values to avoid ConcurrentModificationException
+        List<DpAccumulator> snapshot;
+        synchronized (accumulators) {
+            snapshot = List.copyOf(accumulators.values());
+        }
+
+        return snapshot.stream()
                 .filter(acc -> acc.getGroupCode().equals(groupCode) && acc.getPath().equals(path) && acc.getTmsAccEnd() <= tmsCompare)
                 .toList();
     }
