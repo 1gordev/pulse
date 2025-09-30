@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
 
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,7 @@ public class PulseAlarmEntity {
     public static final String DETAILS = "details";
 
     @Id
+    @Field("_id")
     private String id;
 
     @Indexed(unique = true)

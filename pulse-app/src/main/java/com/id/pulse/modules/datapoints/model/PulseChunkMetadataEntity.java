@@ -9,6 +9,7 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
 
 @Data
 @NoArgsConstructor
@@ -28,6 +29,7 @@ public class PulseChunkMetadataEntity {
     public static final String PATH_TYPE_SAMPLING_RATE_IDX = "path_type_samplingRate_idx";
 
     @Id
+    @Field("_id")
     private String id;
 
     @Indexed

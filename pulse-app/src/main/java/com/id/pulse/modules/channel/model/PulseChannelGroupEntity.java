@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
 
 @Data
 @NoArgsConstructor
@@ -29,6 +30,7 @@ public class PulseChannelGroupEntity {
     public static final String PERSISTED_LIFE_TIME = "persistedLifeTime";
 
     @Id
+    @Field("_id")
     private String id;
 
     @Indexed(unique = true)

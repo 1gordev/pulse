@@ -9,6 +9,7 @@ import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
 
 @Data
 @NoArgsConstructor
@@ -28,6 +29,7 @@ public class PulseChannelEntity {
     public static final String AGGREGATION_TYPE_BASE = "aggregationTypeBase";
 
     @Id
+    @Field("_id")
     private String id;
 
     @Indexed(unique = true)
