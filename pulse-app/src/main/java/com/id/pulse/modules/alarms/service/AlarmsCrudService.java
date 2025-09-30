@@ -13,7 +13,9 @@ import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.px3.crud.logic.PxDefaultCrudServiceMongo;
 import com.id.px3.crud.logic.PxDefaultMapper;
 import lombok.extern.slf4j.Slf4j;
+import com.mongodb.client.result.UpdateResult;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -53,6 +55,7 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
     public PulseAlarm save(PulseAlarm model) {
         var alarm = super.save(model);
         measuresCrudService.save(createTargetMeasure(null, alarm));
+        syncAssetLinks(alarm, null);
         return alarm;
     }
 
@@ -60,11 +63,13 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
     @Override
     @Transactional
     public PulseAlarm update(String id, PulseAlarm model) {
+        var previousState = findById(id);
         var alarm = super.update(id, model);
         var targetMeasureId = measuresCrudService.findByPath(alarm.getTargetMeasurePath())
                 .orElseThrow(() -> new IllegalArgumentException("Target measure not found for alarm: " + id))
                 .getId();
         measuresCrudService.update(targetMeasureId, createTargetMeasure(targetMeasureId, alarm));
+        syncAssetLinks(alarm, previousState);
         return alarm;
     }
 
@@ -77,6 +82,7 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
                 .getId();
         measuresCrudService.delete(targetMeasureId);
         super.delete(id);
+        removeAssetLinks(alarm);
     }
 
     /**
@@ -103,11 +109,13 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
     }
 
     /**
-     * Find all alarms whose details.physicalAssetId list contains the given ID.
+     * Find all alarms whose details.physicalAssetIds list contains the given ID.
      */
     public List<PulseAlarm> findAllReferringPhysicalAsset(String physicalAssetId) {
         // Fetch the raw entity documents
-        List<PulseAlarmEntity> entities = mongoTemplate.find(query(where("details.physicalAssetId").is(physicalAssetId)), PulseAlarmEntity.class);
+        List<PulseAlarmEntity> entities = mongoTemplate.find(
+                query(where("details.physicalAssetIds").is(physicalAssetId)),
+                PulseAlarmEntity.class);
 
         // Convert to your domain model (assuming you have a converter method)
         return entities.stream()
@@ -169,6 +177,91 @@ public class AlarmsCrudService extends PxDefaultCrudServiceMongo<PulseAlarm, Pul
                 upStreams
         );
 
+    }
+
+    private void syncAssetLinks(PulseAlarm current, PulseAlarm previous) {
+        if (current == null || current.getId() == null || current.getId().isBlank()) {
+            return;
+        }
+
+        var newPhysical = extractIds(current, "physicalAssetIds");
+        var oldPhysical = extractIds(previous, "physicalAssetIds");
+        updateAssetCollectionLinks("PhysicalAsset", newPhysical, oldPhysical, current.getId());
+
+        var newVirtual = extractIds(current, "virtualAssetIds");
+        var oldVirtual = extractIds(previous, "virtualAssetIds");
+        updateAssetCollectionLinks("VirtualAsset", newVirtual, oldVirtual, current.getId());
+    }
+
+    private void removeAssetLinks(PulseAlarm alarm) {
+        if (alarm == null || alarm.getId() == null || alarm.getId().isBlank()) {
+            return;
+        }
+        var physicalIds = extractIds(alarm, "physicalAssetIds");
+        var virtualIds = extractIds(alarm, "virtualAssetIds");
+        pullAlarmIdFromAssets("PhysicalAsset", physicalIds, alarm.getId());
+        pullAlarmIdFromAssets("VirtualAsset", virtualIds, alarm.getId());
+    }
+
+    private Set<String> extractIds(PulseAlarm alarm, String key) {
+        if (alarm == null || alarm.getDetails() == null) {
+            return Set.of();
+        }
+        Object raw = alarm.getDetails().get(key);
+        if (!(raw instanceof Collection<?> collection)) {
+            return Set.of();
+        }
+        Set<String> result = new LinkedHashSet<>();
+        for (Object item : collection) {
+            if (item == null) {
+                continue;
+            }
+            String value = item.toString().trim();
+            if (!value.isEmpty()) {
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    private void updateAssetCollectionLinks(String collectionName,
+                                            Set<String> newIds,
+                                            Set<String> oldIds,
+                                            String alarmId) {
+        var toAdd = new HashSet<>(newIds);
+        toAdd.removeAll(oldIds);
+        addAlarmIdToAssets(collectionName, toAdd, alarmId);
+
+        var toRemove = new HashSet<>(oldIds);
+        toRemove.removeAll(newIds);
+        pullAlarmIdFromAssets(collectionName, toRemove, alarmId);
+    }
+
+    private void addAlarmIdToAssets(String collectionName, Collection<String> assetIds, String alarmId) {
+        if (assetIds.isEmpty()) {
+            return;
+        }
+        for (String assetId : assetIds) {
+            var updateResult = mongoTemplate.updateFirst(
+                    query(where("_id").is(assetId)),
+                    new Update().addToSet("alarmIds", alarmId),
+                    collectionName);
+            if (updateResult.getMatchedCount() == 0) {
+                log.warn("Asset {} not found in collection {} while adding alarm link {}", assetId, collectionName, alarmId);
+            }
+        }
+    }
+
+    private void pullAlarmIdFromAssets(String collectionName, Collection<String> assetIds, String alarmId) {
+        if (assetIds.isEmpty()) {
+            return;
+        }
+        for (String assetId : assetIds) {
+            mongoTemplate.updateFirst(
+                    query(where("_id").is(assetId)),
+                    new Update().pull("alarmIds", alarmId),
+                    collectionName);
+        }
     }
 
 }

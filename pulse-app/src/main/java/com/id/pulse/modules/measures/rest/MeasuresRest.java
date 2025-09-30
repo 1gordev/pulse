@@ -73,8 +73,14 @@ public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
 
     @GetMapping("find-all-referring-physical-asset/{physicalAssetId}")
     @JwtSecured
-    public ResponseEntity<List<PulseMeasure>> findAllReferringPhysicalAsset(String physicalAssetId) {
+    public ResponseEntity<List<PulseMeasure>> findAllReferringPhysicalAsset(@PathVariable("physicalAssetId") String physicalAssetId) {
         return ResponseEntity.ok(measuresCrudService.findAllReferringPhysicalAsset(physicalAssetId));
+    }
+
+    @GetMapping("find-all-referring-virtual-asset/{virtualAssetId}")
+    @JwtSecured
+    public ResponseEntity<List<PulseMeasure>> findAllReferringVirtualAsset(@PathVariable("virtualAssetId") String virtualAssetId) {
+        return ResponseEntity.ok(measuresCrudService.findAllReferringVirtualAsset(virtualAssetId));
     }
 
     @PostMapping("test-measure-transform")
