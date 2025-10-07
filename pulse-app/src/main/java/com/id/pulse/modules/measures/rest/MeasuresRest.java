@@ -99,7 +99,7 @@ public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
         return ResponseEntity.ok(measuresCrudService.findByPath(path.get("path")).orElse(null));
     }
 
-    @PostMapping("register-measure-hook")
+    @PostMapping("register-hook")
     @JwtSecured
     public ResponseEntity<Void> registerMeasureHook(@RequestBody PulseMeasureRegisterHook req) {
         measureHookService.registerHook(req);
