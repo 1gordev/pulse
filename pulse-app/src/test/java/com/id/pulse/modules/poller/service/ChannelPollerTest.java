@@ -30,7 +30,7 @@ class ChannelPollerAggregateTest {
         poller = new ChannelPoller(
                 dpManager,
                 null, null, null,
-                null, null, null, null
+                null, null, null, null, null
         );
     }
 
