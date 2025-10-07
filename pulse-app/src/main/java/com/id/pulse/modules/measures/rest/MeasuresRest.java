@@ -3,6 +3,8 @@ package com.id.pulse.modules.measures.rest;
 import com.id.pulse.model.*;
 import com.id.pulse.modules.measures.model.PulseMeasure;
 import com.id.pulse.modules.measures.model.PulseMeasureEntity;
+import com.id.pulse.modules.measures.model.PulseMeasureRegisterHook;
+import com.id.pulse.modules.measures.service.MeasureHookService;
 import com.id.pulse.modules.measures.service.MeasureTransformerManager;
 import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.pulse.modules.poller.service.LatestValuesBucket;
@@ -26,18 +28,20 @@ import java.util.Map;
 public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
 
     private final MeasuresCrudService measuresCrudService;
+    private final MeasureHookService measureHookService;
     private final MeasureTransformerManager measureTransformerManager;
     private final JwtService jwtService;
     private final LatestValuesBucket latestValuesBucket;
     private final Validator validator;
 
-    public MeasuresRest(MeasuresCrudService measuresCrudService,
+    public MeasuresRest(MeasuresCrudService measuresCrudService, MeasureHookService measureHookService,
                         MeasureTransformerManager measureTransformerManager,
                         JwtService jwtService,
                         LatestValuesBucket latestValuesBucket,
                         Validator validator) {
         super();
         this.measuresCrudService = measuresCrudService;
+        this.measureHookService = measureHookService;
         this.measureTransformerManager = measureTransformerManager;
         this.jwtService = jwtService;
         this.latestValuesBucket = latestValuesBucket;
@@ -93,5 +97,12 @@ public class MeasuresRest extends PxRestCrudBase<PulseMeasure, String> {
     @JwtSecured
     public ResponseEntity<PulseMeasure> findByPath(@RequestBody Map<String, String> path) {
         return ResponseEntity.ok(measuresCrudService.findByPath(path.get("path")).orElse(null));
+    }
+
+    @PostMapping("register-measure-hook")
+    @JwtSecured
+    public ResponseEntity<Void> registerMeasureHook(@RequestBody PulseMeasureRegisterHook req) {
+        measureHookService.registerHook(req);
+        return ResponseEntity.ok().build();
     }
 }

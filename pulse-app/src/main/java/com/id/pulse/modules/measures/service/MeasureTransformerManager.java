@@ -72,7 +72,7 @@ public class MeasureTransformerManager {
             var result = transformer.execute(metadata);
 
             // Push results to the latest values bucket
-            latestValuesBucket.writeDataSetAsync(List.of(group), result);
+            latestValuesBucket.writeDataSet(List.of(group), result);
 
         } catch (Exception e) {
             log.error("Error running transformer for group {}: {}", group.getCode(), e.getMessage());

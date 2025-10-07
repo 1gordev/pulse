@@ -46,10 +46,6 @@ public class LatestValuesBucket {
         return matrixBuilder.build();
     }
 
-    public CompletableFuture<Void> writeDataSetAsync(List<PulseChannelGroup> groups, List<PulseDataPoint> dataSet) {
-        return CompletableFuture.runAsync(() -> writeDataSet(groups, dataSet));
-    }
-
     public void writeDataSet(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints) {
         dataPoints.forEach(dataPoint -> writeDataPoint(groups, dataPoint));
     }

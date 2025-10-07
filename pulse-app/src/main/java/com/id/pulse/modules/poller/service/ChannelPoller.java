@@ -10,6 +10,8 @@ import com.id.pulse.modules.channel.service.ChannelsCrudService;
 import com.id.pulse.modules.connector.service.ConnectionManager;
 import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
 import com.id.pulse.modules.datapoints.service.DpAccumulatorsManager;
+import com.id.pulse.modules.measures.model.enums.PulseMeasureRegisterHookType;
+import com.id.pulse.modules.measures.service.MeasureHookService;
 import com.id.pulse.modules.measures.service.MeasureTransformerManager;
 import com.id.pulse.modules.orchestrator.service.ChannelGroupsRegistry;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
@@ -34,6 +36,7 @@ public class ChannelPoller {
     private final DataIngestor dataIngestor;
     private final LatestValuesBucket latestValuesBucket;
     private final MeasureTransformerManager measureTransformerManager;
+    private final MeasureHookService measureHookService;
 
     public ChannelPoller(DpAccumulatorsManager dpAccumulatorsManager,
                          ChannelsCrudService channelsCrudService,
@@ -41,7 +44,9 @@ public class ChannelPoller {
                          ChannelGroupsRegistry channelGroupsRegistry,
                          ConnectionManager connectionManager,
                          DataIngestor dataIngestor,
-                         LatestValuesBucket latestValuesBucket, MeasureTransformerManager measureTransformerManager) {
+                         LatestValuesBucket latestValuesBucket,
+                         MeasureTransformerManager measureTransformerManager,
+                         MeasureHookService measureHookService) {
         this.dpAccumulatorsManager = dpAccumulatorsManager;
         this.channelsCrudService = channelsCrudService;
         this.channelGroupsCrudService = channelGroupsCrudService;
@@ -50,6 +55,7 @@ public class ChannelPoller {
         this.dataIngestor = dataIngestor;
         this.latestValuesBucket = latestValuesBucket;
         this.measureTransformerManager = measureTransformerManager;
+        this.measureHookService = measureHookService;
     }
 
     public void run() {
@@ -207,21 +213,41 @@ public class ChannelPoller {
 
     private void publish(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints) {
         try {
-            latestValuesBucket.writeDataSetAsync(groups, dataPoints);
+            latestValuesBucket.writeDataSet(groups, dataPoints);
         } catch (Exception e) {
             log.error("Error writing into LatestValuesBucket", e);
+            return;
         }
 
         try {
             publishToIngestor(groups, dataPoints);
         } catch (Exception e) {
             log.error("Error writing to DataIngestor", e);
+            return;
         }
 
+        try {
+            // Execute pre-transformers hooks
+            measureHookService.runHooks(PulseMeasureRegisterHookType.BEFORE_ALL_TRANSFORMERS);
+        } catch (Exception e) {
+            log.error("Error running measure hooks", e);
+            return;
+        }
+
+        // Run transformers
         try {
             runMeasureTransformers(groups, dataPoints);
         } catch (Exception e) {
             log.error("Error running measure transformers", e);
+            return;
+        }
+
+        try {
+            // Execute post-transformers hooks
+            measureHookService.runHooks(PulseMeasureRegisterHookType.AFTER_ALL_TRANSFORMERS);
+        } catch (Exception e) {
+            log.error("Error running measure hooks", e);
+            return;
         }
     }
 
