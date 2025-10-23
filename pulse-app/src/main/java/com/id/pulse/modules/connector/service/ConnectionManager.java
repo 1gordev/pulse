@@ -14,6 +14,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -28,6 +29,7 @@ public class ConnectionManager {
     private final ConcurrentHashMap<String, IPulseConnectorRunner> instances = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<PulseConnectorType, Class<? extends IPulseConnectorRunner>> runnerClasses = new ConcurrentHashMap<>();
     private final ConnectorsRegistry connectorsRegistry;
+    private final Map<String, Long> warnNotFound = new HashMap<>();
 
     public ConnectionManager(ApplicationContext appCtx, ConnectorsCrudService connectorsCrudService, ConnectorsRegistry connectorsRegistry) {
         this.appCtx = appCtx;
@@ -95,7 +97,11 @@ public class ConnectionManager {
                 return instance.query(channels);
             }
         } else {
-            log.error("No instance found for code {}", code);
+            long now = System.currentTimeMillis();
+            if (!warnNotFound.containsKey(code) || warnNotFound.get(code) < now) {
+                log.warn("No instance found for code {}", code);
+                warnNotFound.put(code, now + 10000L);
+            }
         }
         return CompletableFuture.completedFuture(List.of());
     }

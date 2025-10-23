@@ -61,8 +61,7 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
                 // Ensure client reference is cleared on failure
                 opcUaClient = null;
                 try {
-                    long sleepMs = Math.max(1, reconnectSeconds) * 1000L;
-                    Thread.sleep(sleepMs);
+                    Thread.sleep(Math.max(1, reconnectSeconds) * 1000L);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     log.info("OPC UA connect retry loop interrupted");
@@ -82,7 +81,8 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
             if (t != null) {
                 try {
                     t.interrupt();
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
             if (opcUaClient != null) {
                 opcUaClient.disconnect();
@@ -161,10 +161,10 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
             if (e == null || e.getStatusCode() == null) return false;
             long code = e.getStatusCode().getValue();
             return code == StatusCodes.Bad_ConnectionClosed
-                    || code == StatusCodes.Bad_SessionClosed
-                    || code == StatusCodes.Bad_SecureChannelClosed
-                    || code == StatusCodes.Bad_NotConnected
-                    || code == StatusCodes.Bad_SessionIdInvalid;
+                   || code == StatusCodes.Bad_SessionClosed
+                   || code == StatusCodes.Bad_SecureChannelClosed
+                   || code == StatusCodes.Bad_NotConnected
+                   || code == StatusCodes.Bad_SessionIdInvalid;
         } catch (Throwable t) {
             return false;
         }
