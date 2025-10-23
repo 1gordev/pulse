@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -14,7 +16,7 @@ public class PulseChannelGroup {
     private String id;
     private String code;
     private String description;
-    private String connectorCode;
+    private List<String> connectors;
     private Boolean enabled;
 
     private Long interval;

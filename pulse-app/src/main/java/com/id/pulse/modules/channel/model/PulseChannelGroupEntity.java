@@ -10,6 +10,8 @@ import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
+import java.util.List;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -20,7 +22,7 @@ public class PulseChannelGroupEntity {
     public static final String ID = "id";
     public static final String CODE = "code";
     public static final String DESCRIPTION = "description";
-    public static final String CONNECTOR_CODE = "connectorCode";
+    public static final String CONNECTORS = "connectors";
     public static final String ENABLED = "enabled";
 
     public static final String INTERVAL = "interval";
@@ -37,7 +39,7 @@ public class PulseChannelGroupEntity {
     private String code;
 
     private String description;
-    private String connectorCode;
+    private List<String> connectors;
     private Boolean enabled;
 
     private Long interval;

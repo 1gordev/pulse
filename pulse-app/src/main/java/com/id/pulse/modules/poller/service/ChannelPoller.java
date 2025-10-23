@@ -92,10 +92,34 @@ public class ChannelPoller {
         Map<String, PulseChannel> channelMap = channels.stream()
                 .collect(Collectors.toMap(PulseChannel::getPath, ch -> ch));
 
-        // Query connector
-        connectionManager
-                .queryConnector(group.getConnectorCode(), Map.of(group, channels))
-                .thenAccept(result -> {
+        // Query all connectors for the group and merge results (last connector wins)
+        List<String> connectors = group.getConnectors();
+        if (connectors == null || connectors.isEmpty()) {
+            log.warn("Group {} has no connectors configured", group.getCode());
+            return;
+        }
+
+        // Take a stable snapshot and preserve declared order (also dedupe while keeping first occurrence)
+        List<String> connectorsOrdered = new ArrayList<>(new LinkedHashSet<>(connectors));
+
+        // Merge by channel path; later connectors overwrite earlier values according to connectorsOrdered
+        java.util.concurrent.CompletableFuture<java.util.Map<String, PulseDataPoint>> mergedFuture = java.util.concurrent.CompletableFuture.completedFuture(new java.util.LinkedHashMap<>());
+        for (String connectorCode : connectorsOrdered) {
+            mergedFuture = mergedFuture.thenCompose(acc -> connectionManager
+                    .queryConnector(connectorCode, Map.of(group, channels))
+                    .thenApply(result -> {
+                        for (PulseDataPoint dp : result) {
+                            acc.put(dp.getPath(), dp);
+                        }
+                        return acc;
+                    })
+            );
+        }
+
+        mergedFuture
+                .thenAccept(acc -> {
+                    var result = new ArrayList<>(acc.values());
+
                     // Extract non-aggregated data points
                     var nonAggPaths = channelMap.values().stream()
                             .filter(ch -> ch.getAggregationType() == null

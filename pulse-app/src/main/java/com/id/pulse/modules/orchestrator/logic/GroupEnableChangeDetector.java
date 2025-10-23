@@ -9,6 +9,8 @@ import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 @Component
 @Scope(BeanDefinition.SCOPE_PROTOTYPE)
 @Slf4j
@@ -32,18 +34,27 @@ public class GroupEnableChangeDetector {
 
         // Enable or disable groups
         groups.forEach(group -> {
+            List<String> connectors = group.getConnectors();
+            if (connectors == null) connectors = List.of();
+
             if (!group.getEnabled()) {
                 // Disable group
                 if (channelGroupsRegistry.getStatus(group.getCode()) == PulseChannelGroupStatusCode.RUNNING) {
                     log.info("Disabling group: {}", group.getCode());
-                    connectorsRegistry.detachGroup(group.getConnectorCode(), group.getCode());
+                    // Detach from all connectors
+                    for (String connectorCode : connectors) {
+                        connectorsRegistry.detachGroup(connectorCode, group.getCode());
+                    }
                     channelGroupsRegistry.setGroupStatus(group.getCode(), PulseChannelGroupStatusCode.IDLE);
                 }
             } else {
                 // Enable group
                 if (channelGroupsRegistry.getStatus(group.getCode()) == PulseChannelGroupStatusCode.IDLE) {
                     log.info("Enabling group: {}", group.getCode());
-                    connectorsRegistry.attachGroup(group.getConnectorCode(), group.getCode());
+                    // Attach to all connectors
+                    for (String connectorCode : connectors) {
+                        connectorsRegistry.attachGroup(connectorCode, group.getCode());
+                    }
                     channelGroupsRegistry.setGroupStatus(group.getCode(), PulseChannelGroupStatusCode.RUNNING);
                 }
             }
