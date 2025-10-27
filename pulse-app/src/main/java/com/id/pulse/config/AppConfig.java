@@ -22,4 +22,7 @@ public class AppConfig {
 
     @Value("${px3.auth.base-url:http://localhost:10181}")
     private String px3AuthBaseUrl;
+
+    @Value("${pulse.connectors-upload-folder:/var/local/iris3/uploads}")
+    private String pulseConnectorsUploadFolder;
 }
