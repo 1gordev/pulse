@@ -7,6 +7,7 @@ import com.id.pulse.modules.connector.model.PulseConnector;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorType;
 import com.id.pulse.modules.connector.runner.IPulseConnectorRunner;
+import com.id.pulse.modules.connector.runner.csv.CsvConnectorRunner;
 import com.id.pulse.modules.connector.runner.opcua.OpcUaConnectorRunner;
 import com.id.pulse.modules.orchestrator.service.ConnectorsRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -36,6 +37,7 @@ public class ConnectionManager {
         this.connectorsCrudService = connectorsCrudService;
 
         runnerClasses.put(PulseConnectorType.OPCUA, OpcUaConnectorRunner.class);
+        runnerClasses.put(PulseConnectorType.CSV, CsvConnectorRunner.class);
         this.connectorsRegistry = connectorsRegistry;
     }
 
