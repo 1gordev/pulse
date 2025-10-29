@@ -61,6 +61,7 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
                 // Ensure client reference is cleared on failure
                 opcUaClient = null;
                 try {
+                    //noinspection BusyWait
                     Thread.sleep(Math.max(1, reconnectSeconds) * 1000L);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();

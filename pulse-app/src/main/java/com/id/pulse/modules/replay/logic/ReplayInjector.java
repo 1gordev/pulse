@@ -1,0 +1,364 @@
+package com.id.pulse.modules.replay.logic;
+
+import com.id.pulse.modules.channel.model.PulseChannelGroup;
+import com.id.pulse.modules.channel.service.ChannelGroupsCrudService;
+import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
+import com.id.pulse.modules.connector.model.enums.PulseConnectorType;
+import com.id.pulse.modules.connector.service.ConnectorsCrudService;
+import com.id.pulse.modules.connector.service.ConnectionManager;
+import com.id.pulse.modules.orchestrator.service.ConnectorsRegistry;
+import com.id.pulse.modules.poller.service.ChannelPoller;
+import com.id.pulse.modules.replay.model.ReplayJob;
+import com.id.pulse.modules.replay.model.ReplayJobStatus;
+import com.id.px3.utils.SafeConvert;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletionException;
+
+@Component
+@Scope(BeanDefinition.SCOPE_PROTOTYPE)
+@Slf4j
+public class ReplayInjector {
+
+    private static final String CSV_PROCESSING_MODE_REPROCESSING = "RE_PROCESSING";
+    private static final String DEFAULT_TIMESTAMP_COLUMN = "timestamp";
+    private static final Duration CONNECTOR_READY_TIMEOUT = Duration.ofSeconds(30);
+    private static final long CONNECTOR_STATUS_POLL_MS = 200L;
+    private static final long LOOP_IDLE_SLEEP_MS = 50L;
+    private static final int LOOP_IDLE_THRESHOLD = 40;
+
+    private final ConnectorsCrudService connectorsCrudService;
+    private final ChannelGroupsCrudService channelGroupsCrudService;
+    private final ConnectionManager connectionManager;
+    private final ConnectorsRegistry connectorsRegistry;
+    private final ChannelPoller channelPoller;
+
+    public ReplayInjector(ConnectorsCrudService connectorsCrudService,
+                          ChannelGroupsCrudService channelGroupsCrudService,
+                          ConnectionManager connectionManager,
+                          ConnectorsRegistry connectorsRegistry,
+                          ChannelPoller channelPoller) {
+        this.connectorsCrudService = connectorsCrudService;
+        this.channelGroupsCrudService = channelGroupsCrudService;
+        this.connectionManager = connectionManager;
+        this.connectorsRegistry = connectorsRegistry;
+        this.channelPoller = channelPoller;
+    }
+
+    public void reprocess(ReplayJob job) {
+        log.info("Starting reprocessing for connector {}", job.getConnectorCode());
+        try {
+            job.setStatus(ReplayJobStatus.RUNNING);
+
+            PulseConnector connector = connectorsCrudService.findByCode(job.getConnectorCode())
+                    .orElseThrow(() -> new IllegalArgumentException("Connector not found: " + job.getConnectorCode()));
+
+            validateConnector(connector);
+            CsvBounds bounds = resolveCsvBounds(connector);
+            job.setSourceBounds(bounds.startTimestamp(), bounds.endTimestamp());
+            job.updateProgress(0);
+
+            List<PulseChannelGroup> groups = channelGroupsCrudService.findByConnectorCode(connector.getCode());
+            if (groups.isEmpty()) {
+                throw new IllegalStateException("No channel groups linked to connector " + connector.getCode());
+            }
+
+            if (!ensureConnectorReady(job, connector.getCode())) {
+                job.setStatus(ReplayJobStatus.CANCELLED);
+                job.setStatusMessage("Reprocessing cancelled");
+                log.info("Reprocessing cancelled before start for connector {}", connector.getCode());
+                return;
+            }
+
+            ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds);
+
+            if (loopResult.cancelled()) {
+                job.setStatus(ReplayJobStatus.CANCELLED);
+                job.setStatusMessage("Reprocessing cancelled");
+                log.info("Reprocessing cancelled for connector {}", connector.getCode());
+                return;
+            }
+
+            if (!loopResult.producedData()) {
+                throw new IllegalStateException("Reprocessing finished without producing data");
+            }
+            if (!loopResult.reachedEnd()) {
+                throw new IllegalStateException("Reprocessing terminated before reaching the end of the dataset");
+            }
+
+            job.updateProgress(100);
+            job.setStatus(ReplayJobStatus.COMPLETED);
+            job.setStatusMessage("Reprocessing completed");
+            log.info("Reprocessing completed for connector {}", connector.getCode());
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            job.setStatus(ReplayJobStatus.FAILED);
+            job.setStatusMessage(e.getMessage());
+            log.error("Reprocessing failed for connector {}: {}", job.getConnectorCode(), e.getMessage(), e);
+        } finally {
+            try {
+                connectionManager.terminateConnection(job.getConnectorCode());
+            } catch (Exception ex) {
+                log.warn("Failed terminating connector {} after replay", job.getConnectorCode(), ex);
+            }
+        }
+    }
+
+    private void validateConnector(PulseConnector connector) {
+        if (connector.getType() != PulseConnectorType.CSV) {
+            throw new IllegalArgumentException("Connector " + connector.getCode() + " is not CSV");
+        }
+
+        Map<String, Object> params = Optional.ofNullable(connector.getParams()).orElse(Map.of());
+        String processingMode = Optional.ofNullable(params.get("processingMode"))
+                .map(Object::toString)
+                .map(mode -> mode.toUpperCase(Locale.ROOT))
+                .orElse(CSV_PROCESSING_MODE_REPROCESSING);
+        if (!CSV_PROCESSING_MODE_REPROCESSING.equals(processingMode)) {
+            throw new IllegalArgumentException("Connector " + connector.getCode() + " is not in RE_PROCESSING mode");
+        }
+    }
+
+    private CsvBounds resolveCsvBounds(PulseConnector connector) throws IOException {
+        Map<String, Object> params = Optional.ofNullable(connector.getParams()).orElse(Map.of());
+        String filePath = Optional.ofNullable(params.get("filePath"))
+                .map(Object::toString)
+                .filter(path -> !path.isBlank())
+                .orElseThrow(() -> new IllegalArgumentException("Connector " + connector.getCode() + " has no filePath"));
+
+        String timestampColumn = Optional.ofNullable(params.get("timestampColumn"))
+                .map(Object::toString)
+                .filter(s -> !s.isBlank())
+                .orElse(DEFAULT_TIMESTAMP_COLUMN);
+
+        Path csvPath = Path.of(filePath);
+        if (!Files.exists(csvPath) || Files.isDirectory(csvPath)) {
+            throw new IllegalArgumentException("CSV file not found: " + filePath);
+        }
+
+        try (BufferedReader reader = Files.newBufferedReader(csvPath, StandardCharsets.UTF_8)) {
+            CsvHeader header = CsvHeader.parse(stripBom(reader.readLine()), timestampColumn);
+            if (header.timestampIndex() < 0) {
+                throw new IllegalArgumentException("Timestamp column '%s' not found in CSV".formatted(timestampColumn));
+            }
+            long minTs = Long.MAX_VALUE;
+            long maxTs = Long.MIN_VALUE;
+            long rowCount = 0;
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                List<String> fields = parseCsvLine(line);
+                if (fields.isEmpty()) {
+                    continue;
+                }
+                String timestampValue = header.timestampIndex() < fields.size() ? fields.get(header.timestampIndex()) : null;
+                Long ts = parseTimestamp(timestampValue);
+                if (ts == null) {
+                    continue;
+                }
+                minTs = Math.min(minTs, ts);
+                maxTs = Math.max(maxTs, ts);
+                rowCount++;
+            }
+
+            if (rowCount == 0 || minTs == Long.MAX_VALUE) {
+                throw new IllegalStateException("CSV file contains no valid timestamped rows");
+            }
+
+            return new CsvBounds(minTs, maxTs);
+        }
+    }
+
+    private boolean ensureConnectorReady(ReplayJob job, String connectorCode) throws InterruptedException {
+        connectionManager.initiateConnection(connectorCode);
+        long start = System.currentTimeMillis();
+        PulseConnectorStatus status;
+        do {
+            status = connectorsRegistry.getStatus(connectorCode);
+            if (status == PulseConnectorStatus.CONNECTED) {
+                return true;
+            }
+            if (status == PulseConnectorStatus.FAILED) {
+                throw new IllegalStateException("Connector " + connectorCode + " failed to open");
+            }
+            if (job.isCancellationRequested()) {
+                return false;
+            }
+            Thread.sleep(CONNECTOR_STATUS_POLL_MS);
+        } while ((System.currentTimeMillis() - start) < CONNECTOR_READY_TIMEOUT.toMillis());
+
+        throw new IllegalStateException("Timeout waiting for connector " + connectorCode + " to become ready");
+    }
+
+    private ReprocessLoopResult executeReprocessingLoop(ReplayJob job,
+                                                        String connectorCode,
+                                                        List<PulseChannelGroup> groups,
+                                                        CsvBounds bounds) throws InterruptedException {
+        long latestTimestamp = bounds.startTimestamp();
+        int idleIterations = 0;
+        boolean producedAtLeastOnce = false;
+
+        while (true) {
+            if (job.isCancellationRequested()) {
+                return new ReprocessLoopResult(producedAtLeastOnce, false, true);
+            }
+            boolean anyData = false;
+            final long[] batchMaxTs = {Long.MIN_VALUE};
+
+            for (PulseChannelGroup group : groups) {
+                if (job.isCancellationRequested()) {
+                    return new ReprocessLoopResult(producedAtLeastOnce, false, true);
+                }
+                try {
+                    var outcome = channelPoller.replayGroup(group).join();
+                    if (outcome != null && outcome.hasData()) {
+                        anyData = true;
+                        outcome.latestTimestamp().ifPresent(ts -> {
+                            if (ts > batchMaxTs[0]) {
+                                batchMaxTs[0] = ts;
+                            }
+                        });
+                    }
+                } catch (CompletionException completionException) {
+                    Throwable cause = completionException.getCause();
+                    if (cause instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    throw completionException;
+                }
+            }
+
+            if (anyData) {
+                idleIterations = 0;
+                producedAtLeastOnce = true;
+                if (batchMaxTs[0] != Long.MIN_VALUE) {
+                    latestTimestamp = Math.max(latestTimestamp, batchMaxTs[0]);
+                    job.updateProgress(computeProgress(latestTimestamp, bounds));
+                    if (latestTimestamp >= bounds.endTimestamp()) {
+                        log.info("Reached end timestamp for connector {}", connectorCode);
+                        return new ReprocessLoopResult(true, true, false);
+                    }
+                }
+            } else {
+                idleIterations++;
+                if (idleIterations > LOOP_IDLE_THRESHOLD) {
+                    log.info("No new data after {} idle iterations for connector {}", idleIterations, connectorCode);
+                    return new ReprocessLoopResult(producedAtLeastOnce, false, false);
+                }
+                Thread.sleep(LOOP_IDLE_SLEEP_MS);
+            }
+        }
+    }
+
+    private int computeProgress(long latestTimestamp, CsvBounds bounds) {
+        long range = Math.max(1L, bounds.endTimestamp() - bounds.startTimestamp());
+        long clamped = Math.max(bounds.startTimestamp(), Math.min(latestTimestamp, bounds.endTimestamp()));
+        double ratio = (double) (clamped - bounds.startTimestamp()) / (double) range;
+        return (int) Math.round(Math.min(1.0, Math.max(0.0, ratio)) * 100.0);
+    }
+
+    private static String stripBom(String value) {
+        if (value == null) {
+            return null;
+        }
+        if (!value.isEmpty() && value.charAt(0) == '\uFEFF') {
+            return value.substring(1);
+        }
+        return value;
+    }
+
+    private static List<String> parseCsvLine(String line) {
+        if (line == null || line.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') {
+                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    current.append('"');
+                    i++;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (c == ',' && !inQuotes) {
+                result.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        result.add(current.toString());
+
+        for (int i = 0; i < result.size(); i++) {
+            String value = result.get(i).trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1);
+            }
+            result.set(i, value);
+        }
+        return result;
+    }
+
+    private static Long parseTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String trimmed = value.trim();
+        Optional<Long> asLong = SafeConvert.toLong(trimmed);
+        if (asLong.isPresent()) {
+            long ts = asLong.get();
+            if (ts > 1_000_000_000L && ts < 1_000_000_000_000L) { // likely seconds
+                ts = ts * 1000L;
+            }
+            return ts;
+        }
+        try {
+            return java.time.Instant.parse(trimmed).toEpochMilli();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private record CsvHeader(List<String> columns, int timestampIndex) {
+        static CsvHeader parse(String headerLine, String timestampColumn) {
+            List<String> columns = parseCsvLine(headerLine);
+            int idx = -1;
+            for (int i = 0; i < columns.size(); i++) {
+                if (columns.get(i).equalsIgnoreCase(timestampColumn)) {
+                    idx = i;
+                    break;
+                }
+            }
+            return new CsvHeader(columns, idx);
+        }
+    }
+
+    private record CsvBounds(long startTimestamp, long endTimestamp) {
+    }
+
+    private record ReprocessLoopResult(boolean producedData, boolean reachedEnd, boolean cancelled) {
+    }
+}

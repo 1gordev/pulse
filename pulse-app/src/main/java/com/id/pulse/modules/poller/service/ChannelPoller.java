@@ -14,11 +14,13 @@ import com.id.pulse.modules.measures.model.enums.PulseMeasureRegisterHookType;
 import com.id.pulse.modules.measures.service.MeasureHookService;
 import com.id.pulse.modules.measures.service.MeasureTransformerManager;
 import com.id.pulse.modules.orchestrator.service.ChannelGroupsRegistry;
+import com.id.pulse.modules.poller.model.PollOutcome;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -81,11 +83,21 @@ public class ChannelPoller {
         }
     }
 
-    private void pollGroupThenPublish(PulseChannelGroup group) {
+    public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group) {
+        return pollGroupThenPublish(group);
+    }
+
+    public CompletableFuture<PollOutcome> replayGroup(String groupCode) {
+        var group = channelGroupsCrudService.findByCode(groupCode)
+                .orElseThrow(() -> new IllegalStateException("Group not found: " + groupCode));
+        return pollGroupThenPublish(group);
+    }
+
+    private CompletableFuture<PollOutcome> pollGroupThenPublish(PulseChannelGroup group) {
         // Load all channels
         var channels = channelsCrudService.findByChannelGroupCode(group.getCode());
         if (channels.isEmpty()) {
-            return;
+            return CompletableFuture.completedFuture(PollOutcome.empty());
         }
 
         // Build a map from path to channel
@@ -96,14 +108,15 @@ public class ChannelPoller {
         List<String> connectors = group.getConnectors();
         if (connectors == null || connectors.isEmpty()) {
             log.warn("Group {} has no connectors configured", group.getCode());
-            return;
+            return CompletableFuture.completedFuture(PollOutcome.empty());
         }
 
         // Take a stable snapshot and preserve declared order (also dedupe while keeping first occurrence)
         List<String> connectorsOrdered = new ArrayList<>(new LinkedHashSet<>(connectors));
 
         // Merge by channel path; later connectors overwrite earlier values according to connectorsOrdered
-        java.util.concurrent.CompletableFuture<java.util.Map<String, PulseDataPoint>> mergedFuture = java.util.concurrent.CompletableFuture.completedFuture(new java.util.LinkedHashMap<>());
+        java.util.concurrent.CompletableFuture<java.util.Map<String, PulseDataPoint>> mergedFuture =
+                java.util.concurrent.CompletableFuture.completedFuture(new java.util.LinkedHashMap<>());
         for (String connectorCode : connectorsOrdered) {
             mergedFuture = mergedFuture.thenCompose(acc -> connectionManager
                     .queryConnector(connectorCode, Map.of(group, channels))
@@ -116,9 +129,12 @@ public class ChannelPoller {
             );
         }
 
-        mergedFuture
-                .thenAccept(acc -> {
+        return mergedFuture
+                .thenApply(acc -> {
                     var result = new ArrayList<>(acc.values());
+                    if (result.isEmpty()) {
+                        return PollOutcome.empty();
+                    }
 
                     // Extract non-aggregated data points
                     var nonAggPaths = channelMap.values().stream()
@@ -129,23 +145,37 @@ public class ChannelPoller {
 
                     var nonAggDps = result.stream()
                             .filter(dp -> nonAggPaths.contains(dp.getPath()))
-                            .toList();
-
-                    if (!nonAggDps.isEmpty()) {
-                        truncateToPrecision(channelMap, nonAggDps);
-                        publish(List.of(group), nonAggDps);
-                    }
+                            .collect(Collectors.toCollection(ArrayList::new));
 
                     // Aggregate and publish
                     var aggDps = aggregate(channels, result);
+                    List<PulseDataPoint> toPublish = new ArrayList<>();
+
+                    if (!nonAggDps.isEmpty()) {
+                        truncateToPrecision(channelMap, nonAggDps);
+                        toPublish.addAll(nonAggDps);
+                    }
+
                     if (!aggDps.isEmpty()) {
                         truncateToPrecision(channelMap, aggDps);
-                        publish(List.of(group), aggDps);
+                        toPublish.addAll(aggDps);
                     }
+
+                    if (toPublish.isEmpty()) {
+                        return PollOutcome.empty();
+                    }
+
+                    publish(List.of(group), toPublish);
+
+                    long latestTs = toPublish.stream()
+                            .mapToLong(PulseDataPoint::getTms)
+                            .max()
+                            .orElse(Long.MIN_VALUE);
+                    return PollOutcome.withData(toPublish.size(), latestTs);
                 })
                 .exceptionally(ex -> {
                     log.error("Error during queryConnector", ex);
-                    return null;
+                    return PollOutcome.empty();
                 });
     }
 
@@ -186,6 +216,7 @@ public class ChannelPoller {
                 dp.setVal(truncated);
                 dp.setType(PulseDataType.DOUBLE);
             }
+
         }
     }
 
@@ -218,7 +249,7 @@ public class ChannelPoller {
                             acc.push(dp);
                         });
 
-                        if(!dataPointsOfChannelByTms.isEmpty()) {
+                        if (!dataPointsOfChannelByTms.isEmpty()) {
                             // Close accumulators which have been completed
                             var accCompleted = dpAccumulatorsManager.findCompleted(channel.getChannelGroupCode(), channel.getPath(), dataPointsOfChannelByTms.lastKey());
 
@@ -278,7 +309,7 @@ public class ChannelPoller {
     private void runMeasureTransformers(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints) {
         groups.forEach(group -> {
             var dps = dataPoints.stream().filter(dp -> dp.getGroupCode().equals(group.getCode())).toList();
-            if(dps.isEmpty()) {
+            if (dps.isEmpty()) {
                 return;
             }
 

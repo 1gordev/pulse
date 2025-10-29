@@ -70,7 +70,7 @@ public class AlarmsRest extends PxRestCrudBase<PulseAlarm, String> {
 
     @GetMapping("find-all-referring-physical-asset/{physicalAssetId}")
     @JwtSecured
-    public ResponseEntity<List<PulseAlarm>> findAllReferringPhysicalAsset(String physicalAssetId) {
+    public ResponseEntity<List<PulseAlarm>> findAllReferringPhysicalAsset(@PathVariable("physicalAssetId") String physicalAssetId) {
         return ResponseEntity.ok(alarmsCrudService.findAllReferringPhysicalAsset(physicalAssetId));
     }
 

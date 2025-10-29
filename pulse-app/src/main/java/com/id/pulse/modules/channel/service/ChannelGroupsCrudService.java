@@ -44,4 +44,15 @@ public class ChannelGroupsCrudService extends PxDefaultCrudServiceMongo<PulseCha
         var mapper = getMapper();
         return mongoTemplate.find(query(where(PulseChannelGroupEntity.CODE).in(codes)), getEntityClass(), getCollectionName()).stream().map(mapper::toModel).toList();
     }
+
+    public List<PulseChannelGroup> findByConnectorCode(String connectorCode) {
+        var mapper = getMapper();
+        return mongoTemplate.find(
+                        query(where(PulseChannelGroupEntity.CONNECTORS).is(connectorCode)),
+                        getEntityClass(),
+                        getCollectionName())
+                .stream()
+                .map(mapper::toModel)
+                .toList();
+    }
 }
