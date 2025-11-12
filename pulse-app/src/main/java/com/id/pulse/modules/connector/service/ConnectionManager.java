@@ -31,6 +31,7 @@ public class ConnectionManager {
     private final ConcurrentHashMap<PulseConnectorType, Class<? extends IPulseConnectorRunner>> runnerClasses = new ConcurrentHashMap<>();
     private final ConnectorsRegistry connectorsRegistry;
     private final Map<String, Long> warnNotFound = new HashMap<>();
+    private final ConcurrentHashMap<String, Boolean> replayModes = new ConcurrentHashMap<>();
 
     public ConnectionManager(ApplicationContext appCtx, ConnectorsCrudService connectorsCrudService, ConnectorsRegistry connectorsRegistry) {
         this.appCtx = appCtx;
@@ -63,6 +64,13 @@ public class ConnectionManager {
 
                 var runnerInstance = appCtx.getBean(runnerClass);
                 instances.put(code, runnerInstance);
+                Boolean replayMode = replayModes.get(code);
+                if (replayMode != null) {
+                    try {
+                        runnerInstance.setReplayMode(replayMode);
+                    } catch (Exception ignored) {
+                    }
+                }
 
                 // Initialize the runner
                 log.trace("Initializing runner: {}", runnerInstance.getClass().getName());
@@ -88,6 +96,7 @@ public class ConnectionManager {
         }
         // Update the status
         connectorsRegistry.setStatus(code, PulseConnectorStatus.IDLE);
+        replayModes.remove(code);
     }
 
     @Async
@@ -106,6 +115,28 @@ public class ConnectionManager {
             }
         }
         return CompletableFuture.completedFuture(List.of());
+    }
+
+    public void setReplayMode(String code, boolean replayMode) {
+        IPulseConnectorRunner runner = instances.get(code);
+        if (runner != null) {
+            try {
+                runner.setReplayMode(replayMode);
+            } catch (Exception ignored) {
+            }
+        }
+        replayModes.put(code, replayMode);
+    }
+
+    public boolean isReplayComplete(String code) {
+        IPulseConnectorRunner runner = instances.get(code);
+        if (runner != null) {
+            try {
+                return runner.isReplayComplete();
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     public Class<? extends IPulseConnectorRunner> getConnectorClass(String connectorCode) {

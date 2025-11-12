@@ -17,4 +17,12 @@ public interface IPulseConnectorRunner {
     PulseConnectorStatus close();
 
     CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap);
+
+    default void setReplayMode(boolean replayMode) {
+        // default no-op
+    }
+
+    default boolean isReplayComplete() {
+        return false;
+    }
 }

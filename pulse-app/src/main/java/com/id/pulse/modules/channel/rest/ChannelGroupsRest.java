@@ -12,6 +12,8 @@ import com.id.px3.crud.access.PxTokenBasedAccessControl;
 import com.id.px3.crud.validation.PxDefaultValidator;
 import com.id.px3.rest.security.JwtService;
 import jakarta.validation.Validator;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -51,5 +53,10 @@ public class ChannelGroupsRest extends PxRestCrudBase<PulseChannelGroup, String>
     @Override
     protected IPxCrudValidator<PulseChannelGroup> provideValidator() {
         return new PxDefaultValidator<>(validator);
+    }
+
+    @GetMapping("by-connector/{connectorCode}")
+    public List<PulseChannelGroup> findByConnector(@PathVariable("connectorCode") String connectorCode) {
+        return channelGroupsCrudService.findByConnectorCode(connectorCode);
     }
 }

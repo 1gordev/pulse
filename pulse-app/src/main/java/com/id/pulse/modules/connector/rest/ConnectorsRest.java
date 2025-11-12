@@ -81,7 +81,11 @@ public class ConnectorsRest extends PxRestCrudBase<PulseConnector, String> {
     }
 
     @GetMapping(value = "csv-headers")
-    public List<String> getCsvHeaders(@org.springframework.web.bind.annotation.RequestParam("filePath") String filePath) throws IOException {
+    public List<String> getCsvHeaders(
+            @org.springframework.web.bind.annotation.RequestParam("filePath") String filePath,
+            @org.springframework.web.bind.annotation.RequestParam(value = "headerRowIndex", required = false, defaultValue = "0") int headerRowIndex,
+            @org.springframework.web.bind.annotation.RequestParam(value = "columnSeparator", required = false, defaultValue = ",") String columnSeparator
+    ) throws IOException {
         if (filePath == null || filePath.isBlank()) {
             return List.of();
         }
@@ -89,11 +93,20 @@ public class ConnectorsRest extends PxRestCrudBase<PulseConnector, String> {
         if (!Files.exists(path) || Files.isDirectory(path)) {
             return List.of();
         }
+        if (headerRowIndex < 0) {
+            headerRowIndex = 0;
+        }
         try (BufferedReader reader = Files.newBufferedReader(path)) {
-            String headerLine = reader.readLine();
-            if (headerLine == null) return List.of();
-            headerLine = stripBom(headerLine);
-            return parseCsvLine(headerLine);
+            String line;
+            int current = 0;
+            while ((line = reader.readLine()) != null) {
+                if (current == headerRowIndex) {
+                    line = stripBom(line);
+                    return parseCsvLine(line, columnSeparator == null || columnSeparator.isBlank() ? ',' : columnSeparator.trim().charAt(0));
+                }
+                current++;
+            }
+            return List.of();
         }
     }
 
@@ -105,7 +118,7 @@ public class ConnectorsRest extends PxRestCrudBase<PulseConnector, String> {
         return s;
     }
 
-    private static List<String> parseCsvLine(String line) {
+    private static List<String> parseCsvLine(String line, char separator) {
         if (line == null) return List.of();
         List<String> result = new java.util.ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -120,7 +133,7 @@ public class ConnectorsRest extends PxRestCrudBase<PulseConnector, String> {
                 } else {
                     inQuotes = !inQuotes;
                 }
-            } else if (c == ',' && !inQuotes) {
+            } else if (c == separator && !inQuotes) {
                 result.add(current.toString());
                 current.setLength(0);
             } else {

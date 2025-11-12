@@ -3,15 +3,16 @@ package com.id.pulse.modules.replay.logic;
 import com.id.pulse.modules.channel.model.PulseChannelGroup;
 import com.id.pulse.modules.channel.service.ChannelGroupsCrudService;
 import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.CsvTimestampFormat;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorType;
 import com.id.pulse.modules.connector.service.ConnectorsCrudService;
 import com.id.pulse.modules.connector.service.ConnectionManager;
+import com.id.pulse.modules.connector.util.CsvTimestampParser;
 import com.id.pulse.modules.orchestrator.service.ConnectorsRegistry;
 import com.id.pulse.modules.poller.service.ChannelPoller;
 import com.id.pulse.modules.replay.model.ReplayJob;
 import com.id.pulse.modules.replay.model.ReplayJobStatus;
-import com.id.px3.utils.SafeConvert;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.context.annotation.Scope;
@@ -41,7 +42,6 @@ public class ReplayInjector {
     private static final long CONNECTOR_STATUS_POLL_MS = 200L;
     private static final long LOOP_IDLE_SLEEP_MS = 50L;
     private static final int LOOP_IDLE_THRESHOLD = 40;
-
     private final ConnectorsCrudService connectorsCrudService;
     private final ChannelGroupsCrudService channelGroupsCrudService;
     private final ConnectionManager connectionManager;
@@ -85,6 +85,7 @@ public class ReplayInjector {
                 return;
             }
 
+            connectionManager.setReplayMode(connector.getCode(), true);
             ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds);
 
             if (loopResult.cancelled()) {
@@ -114,6 +115,7 @@ public class ReplayInjector {
             log.error("Reprocessing failed for connector {}: {}", job.getConnectorCode(), e.getMessage(), e);
         } finally {
             try {
+                connectionManager.setReplayMode(job.getConnectorCode(), false);
                 connectionManager.terminateConnection(job.getConnectorCode());
             } catch (Exception ex) {
                 log.warn("Failed terminating connector {} after replay", job.getConnectorCode(), ex);
@@ -145,19 +147,41 @@ public class ReplayInjector {
 
         String timestampColumn = Optional.ofNullable(params.get("timestampColumn"))
                 .map(Object::toString)
-                .filter(s -> !s.isBlank())
+                .map(String::trim)
                 .orElse(DEFAULT_TIMESTAMP_COLUMN);
+        CsvTimestampFormat timestampFormat = CsvTimestampParser.resolveFormat(params.get("timestampFormat"));
+        int timestampOffsetMinutes = CsvTimestampParser.resolveOffsetMinutes(params.get("timestampOffset"));
+        int headerRowIndex = normalizeIndex(params.get("headerRowIndex"), 0);
+        int dataRowIndex = normalizeIndex(params.get("dataRowIndex"), headerRowIndex + 1);
+        if (dataRowIndex <= headerRowIndex) {
+            dataRowIndex = headerRowIndex + 1;
+        }
+        boolean columnSeparatorProvided = params.get("columnSeparator") != null
+                && !params.get("columnSeparator").toString().trim().isEmpty();
 
         Path csvPath = Path.of(filePath);
         if (!Files.exists(csvPath) || Files.isDirectory(csvPath)) {
             throw new IllegalArgumentException("CSV file not found: " + filePath);
         }
 
+        char columnSeparator = normalizeSeparator(params.get("columnSeparator"), ',');
         try (BufferedReader reader = Files.newBufferedReader(csvPath, StandardCharsets.UTF_8)) {
-            CsvHeader header = CsvHeader.parse(stripBom(reader.readLine()), timestampColumn);
+            String rawHeader = readLineAtIndex(reader, headerRowIndex);
+            if (rawHeader == null) {
+                throw new IllegalArgumentException("Header row %d not found in CSV".formatted(headerRowIndex));
+            }
+            if (!columnSeparatorProvided) {
+                columnSeparator = detectSeparator(rawHeader, columnSeparator);
+            }
+            String headerLine = stripBom(rawHeader);
+            if (headerLine == null) {
+                throw new IllegalArgumentException("Header row %d not found in CSV".formatted(headerRowIndex));
+            }
+            CsvHeader header = CsvHeader.parse(stripBom(headerLine), timestampColumn, columnSeparator);
             if (header.timestampIndex() < 0) {
                 throw new IllegalArgumentException("Timestamp column '%s' not found in CSV".formatted(timestampColumn));
             }
+            skipLines(reader, Math.max(0, dataRowIndex - headerRowIndex - 1));
             long minTs = Long.MAX_VALUE;
             long maxTs = Long.MIN_VALUE;
             long rowCount = 0;
@@ -167,12 +191,12 @@ public class ReplayInjector {
                 if (line.isBlank()) {
                     continue;
                 }
-                List<String> fields = parseCsvLine(line);
+                List<String> fields = parseCsvLine(line, columnSeparator);
                 if (fields.isEmpty()) {
                     continue;
                 }
                 String timestampValue = header.timestampIndex() < fields.size() ? fields.get(header.timestampIndex()) : null;
-                Long ts = parseTimestamp(timestampValue);
+                Long ts = CsvTimestampParser.parse(timestampValue, timestampFormat, timestampOffsetMinutes);
                 if (ts == null) {
                     continue;
                 }
@@ -219,6 +243,9 @@ public class ReplayInjector {
         boolean producedAtLeastOnce = false;
 
         while (true) {
+            if (connectionManager.isReplayComplete(connectorCode)) {
+                return new ReprocessLoopResult(producedAtLeastOnce, true, false);
+            }
             if (job.isCancellationRequested()) {
                 return new ReprocessLoopResult(producedAtLeastOnce, false, true);
             }
@@ -262,6 +289,10 @@ public class ReplayInjector {
             } else {
                 idleIterations++;
                 if (idleIterations > LOOP_IDLE_THRESHOLD) {
+                    if (connectionManager.isReplayComplete(connectorCode)) {
+                        log.info("Reached EOF for connector {}", connectorCode);
+                        return new ReprocessLoopResult(producedAtLeastOnce, true, false);
+                    }
                     log.info("No new data after {} idle iterations for connector {}", idleIterations, connectorCode);
                     return new ReprocessLoopResult(producedAtLeastOnce, false, false);
                 }
@@ -287,7 +318,7 @@ public class ReplayInjector {
         return value;
     }
 
-    private static List<String> parseCsvLine(String line) {
+    private static List<String> parseCsvLine(String line, char separator) {
         if (line == null || line.isEmpty()) {
             return List.of();
         }
@@ -303,7 +334,7 @@ public class ReplayInjector {
                 } else {
                     inQuotes = !inQuotes;
                 }
-            } else if (c == ',' && !inQuotes) {
+            } else if (c == separator && !inQuotes) {
                 result.add(current.toString());
                 current.setLength(0);
             } else {
@@ -322,35 +353,113 @@ public class ReplayInjector {
         return result;
     }
 
-    private static Long parseTimestamp(String value) {
-        if (value == null || value.isBlank()) {
-            return null;
+    private char normalizeSeparator(Object raw, char fallback) {
+        if (raw == null) {
+            return fallback;
         }
-        String trimmed = value.trim();
-        Optional<Long> asLong = SafeConvert.toLong(trimmed);
-        if (asLong.isPresent()) {
-            long ts = asLong.get();
-            if (ts > 1_000_000_000L && ts < 1_000_000_000_000L) { // likely seconds
-                ts = ts * 1000L;
+        String text = raw.toString();
+        if (text.isBlank()) {
+            return fallback;
+        }
+        return text.trim().charAt(0);
+    }
+
+    private char detectSeparator(String line, char current) {
+        if (line == null) {
+            return current;
+        }
+        int commas = 0;
+        int semicolons = 0;
+        boolean inQuotes = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (!inQuotes) {
+                if (c == ',') {
+                    commas++;
+                } else if (c == ';') {
+                    semicolons++;
+                }
             }
-            return ts;
+        }
+        if (semicolons > commas && semicolons > 0) {
+            return ';';
+        }
+        if (commas > semicolons && commas > 0) {
+            return ',';
+        }
+        return current;
+    }
+
+    private int normalizeIndex(Object raw, int fallback) {
+        if (raw == null) {
+            return fallback;
         }
         try {
-            return java.time.Instant.parse(trimmed).toEpochMilli();
-        } catch (Exception ignored) {
+            int value = Integer.parseInt(raw.toString());
+            return Math.max(0, value);
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
+    }
+
+    private String readLineAtIndex(BufferedReader reader, int targetIndex) throws IOException {
+        if (targetIndex <= 0) {
+            return reader.readLine();
+        }
+        String line;
+        int current = 0;
+        while ((line = reader.readLine()) != null) {
+            if (current == targetIndex) {
+                return line;
+            }
+            current++;
         }
         return null;
     }
 
+    private void skipLines(BufferedReader reader, int linesToSkip) throws IOException {
+        if (linesToSkip <= 0) {
+            return;
+        }
+        for (int i = 0; i < linesToSkip; i++) {
+            if (reader.readLine() == null) {
+                break;
+            }
+        }
+    }
+
     private record CsvHeader(List<String> columns, int timestampIndex) {
-        static CsvHeader parse(String headerLine, String timestampColumn) {
-            List<String> columns = parseCsvLine(headerLine);
+        static CsvHeader parse(String headerLine, String timestampColumn, char separator) {
+            List<String> columns = parseCsvLine(headerLine, separator);
+            boolean timestampBlank = timestampColumn == null || timestampColumn.isBlank();
             int idx = -1;
             for (int i = 0; i < columns.size(); i++) {
-                if (columns.get(i).equalsIgnoreCase(timestampColumn)) {
-                    idx = i;
-                    break;
+                String col = columns.get(i);
+                String normalized = col == null ? "" : col.trim();
+                boolean columnBlank = normalized.isEmpty();
+                if (columnBlank) {
+                    if (timestampBlank) {
+                        if (idx >= 0) {
+                            throw new IllegalArgumentException("CSV header contains multiple blank columns; only the timestamp column may be blank.");
+                        }
+                        idx = i;
+                    } else {
+                        throw new IllegalArgumentException("CSV header contains blank column names; only the timestamp column may be blank.");
+                    }
+                    continue;
                 }
+                if (!timestampBlank && normalized.equalsIgnoreCase(timestampColumn)) {
+                    idx = i;
+                }
+            }
+            if (timestampBlank) {
+                if (idx < 0) {
+                    throw new IllegalArgumentException("Timestamp column configured as blank, but CSV header does not contain a blank column.");
+                }
+            } else if (idx < 0) {
+                throw new IllegalArgumentException("Timestamp column '%s' not found in CSV header %s".formatted(timestampColumn, columns));
             }
             return new CsvHeader(columns, idx);
         }
