@@ -5,6 +5,7 @@ import com.id.pulse.modules.channel.model.PulseChannel;
 import com.id.pulse.modules.channel.model.PulseChannelGroup;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.ConnectorCallReason;
 import com.id.pulse.modules.connector.model.enums.CsvTimestampFormat;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 import com.id.pulse.modules.connector.runner.IPulseConnectorRunner;
@@ -36,14 +37,15 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     private String timestampColumn = "timestamp";
     private CsvTimestampFormat timestampFormat = CsvTimestampFormat.ISO_8601;
     private int timestampOffsetMinutes = 0;
-    private boolean timeRealign = false;
-    private double speedMultiplier = 1.0;
     private char columnSeparator = ',';
     private char decimalSeparator = '.';
     private boolean columnSeparatorProvided = false;
     private boolean decimalSeparatorProvided = false;
     private int headerRowIndex = 0;
     private int dataRowIndex = 1;
+    private boolean reverseReadOrder = false;
+    private File workingFile;
+    private File tempReversedFile;
 
     // Streaming state
     private BufferedReader reader;
@@ -52,11 +54,13 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     private final Map<String, Object> lastChannelValues = new HashMap<>();
 
     // Playback state
-    private long wallStartTime = 0L;   // System.currentTimeMillis() when opened
-    private long fileStartTime = 0L;   // first row original timestamp (ms)
     private String[] nextRowBuffer;    // buffered first unread row tokens
     private boolean eof = false;
     private volatile boolean eofReached = false;
+    private volatile long totalRows = 0L;
+    private volatile long processedRows = 0L;
+    private volatile int progressPercent = 0;
+    private volatile long batchStartMillis = 0L;
 
     // minor: log suppression for missing columns
     private final Set<String> missingColumnsWarned = new HashSet<>();
@@ -92,9 +96,11 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
             if (dataRowIndex <= headerRowIndex) {
                 dataRowIndex = headerRowIndex + 1;
             }
-            this.timeRealign = SafeConvert.toBoolean(params.getOrDefault("timeRealign", false)).orElse(false);
-            this.speedMultiplier = SafeConvert.toDouble(params.getOrDefault("speedMultiplier", 1)).orElse(1.0);
-            if (speedMultiplier <= 0) speedMultiplier = 1.0;
+            boolean timeRealign = SafeConvert.toBoolean(params.getOrDefault("timeRealign", false)).orElse(false);
+            if (timeRealign) {
+                throw new IllegalArgumentException("CSV connector no longer supports timeRealign parameter");
+            }
+            this.reverseReadOrder = SafeConvert.toBoolean(params.getOrDefault("reverseReadOrder", false)).orElse(false);
             this.lastChannelValues.clear();
             this.eof = false;
             this.eofReached = false;
@@ -104,14 +110,28 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
                 return PulseConnectorStatus.FAILED;
             }
 
-            File f = new File(filePath);
-            if (!f.exists() || !f.isFile()) {
+            File sourceFile = new File(filePath);
+            if (!sourceFile.exists() || !sourceFile.isFile()) {
                 log.error("CSV connector: File not found: {}", filePath);
                 return PulseConnectorStatus.FAILED;
             }
 
+            if (reverseReadOrder) {
+                this.tempReversedFile = createReversedCopy(sourceFile);
+                this.workingFile = tempReversedFile;
+                log.info("CSV connector: reverseReadOrder enabled, using temporary file {}", workingFile.getAbsolutePath());
+            } else {
+                this.workingFile = sourceFile;
+                this.tempReversedFile = null;
+            }
+
+            this.totalRows = countDataRows(workingFile, dataRowIndex);
+            this.processedRows = 0;
+            this.progressPercent = totalRows > 0 ? 0 : 100;
+            this.batchStartMillis = 0L;
+
             // Open reader and load header + first row timestamp without loading entire file
-            InputStream in = new FileInputStream(f);
+            InputStream in = new FileInputStream(workingFile);
             this.reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8), 64 * 1024);
 
             // Read header at configured row
@@ -144,13 +164,15 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
 
             skipLines(reader, Math.max(0, dataRowIndex - headerRowIndex - 1));
 
-            // Read first data row to determine fileStartTime; buffer it for later processing
+            // Read first data row and buffer it for later processing
             String firstDataLine;
             while (true) {
                 firstDataLine = reader.readLine();
                 if (firstDataLine == null) {
                     log.warn("CSV connector: No data rows found in file: {}", filePath);
                     eof = true;
+                    eofReached = true;
+                    markProgressComplete();
                     break;
                 }
                 String[] tokens = toArray(parseCsvLine(firstDataLine, columnSeparator));
@@ -158,24 +180,22 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
                 detectDecimalSeparatorIfNeeded(tokens);
                 Long ts = CsvTimestampParser.parse(tokens[tsColIdx], timestampFormat, timestampOffsetMinutes);
                 if (ts != null && ts > 0) {
-                    fileStartTime = ts;
                     nextRowBuffer = tokens; // keep buffered for first query
                     break;
                 }
                 // skip rows with invalid timestamp
             }
-
-            wallStartTime = System.currentTimeMillis();
-
             running = true;
-            log.info("CSV connector opened. file='{}', headerRow={}, dataRow={}, tsCol='{}', format={}, offset={}min, sep='{}', dec='{}', realign={}, speed={}",
-                    filePath, headerRowIndex, dataRowIndex, timestampColumn, timestampFormat, timestampOffsetMinutes, columnSeparator, decimalSeparator, timeRealign, speedMultiplier);
+            log.info("CSV connector opened. file='{}', headerRow={}, dataRow={}, tsCol='{}', format={}, offset={}min, sep='{}', dec='{}'",
+                    filePath, headerRowIndex, dataRowIndex, timestampColumn, timestampFormat, timestampOffsetMinutes, columnSeparator, decimalSeparator);
             return PulseConnectorStatus.CONNECTED;
         } catch (Exception e) {
             log.error("CSV connector: Failed to open", e);
             safeClose(reader);
             reader = null;
             running = false;
+            cleanupTempFile();
+            workingFile = null;
             return PulseConnectorStatus.FAILED;
         }
     }
@@ -187,6 +207,9 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
             safeClose(reader);
             reader = null;
             lastChannelValues.clear();
+            resetProgressTracking();
+            cleanupTempFile();
+            workingFile = null;
             return PulseConnectorStatus.IDLE;
         } catch (Exception e) {
             log.error("CSV connector: error while closing", e);
@@ -199,7 +222,17 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
         this.replayMode = replayMode;
         if (!replayMode) {
             lastChannelValues.clear();
+            resetProgressTracking();
         }
+    }
+
+    @Override
+    public CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap,
+                                                         ConnectorCallReason reason) {
+        if (reason == ConnectorCallReason.LIVE) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        return query(channelsMap);
     }
 
     @Override
@@ -227,11 +260,11 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
                         continue;
                     }
                     rowsRead++;
-                    long outTms = computeOutputTimestamp(rowTs);
-                    emitRow(channelsMap, row, outTms, out);
+                    emitRow(channelsMap, row, rowTs, out);
                 }
                 if (rowsRead == 0 && eof) {
                     lastChannelValues.clear();
+                    eofReached = true;
                 }
                 return out;
             } catch (Exception e) {
@@ -243,11 +276,22 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
         });
     }
 
+    @Override
+    public boolean isReplayComplete() {
+        return eofReached;
+    }
+
+    @Override
+    public int getReplayProgressPercent() {
+        return progressPercent;
+    }
+
     // Read next row either from buffer or from reader; sets eof if reached end
     private String[] pollNextRow() {
         if (nextRowBuffer != null) {
             String[] out = nextRowBuffer;
             nextRowBuffer = null;
+            incrementProcessedRows();
             return out;
         }
         try {
@@ -255,13 +299,18 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
             while ((line = reader.readLine()) != null) {
                 String[] tokens = toArray(parseCsvLine(line, columnSeparator));
                 if (tokens.length == 0) continue;
+                incrementProcessedRows();
                 return tokens;
             }
             eof = true;
+            eofReached = true;
+            markProgressComplete();
             return null;
         } catch (IOException e) {
             log.error("CSV connector: failed reading next row", e);
             eof = true;
+            eofReached = true;
+            markProgressComplete();
             return null;
         }
     }
@@ -269,6 +318,98 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     private static void safeClose(Closeable c) {
         if (c == null) return;
         try { c.close(); } catch (Exception ignored) { }
+    }
+
+    private void cleanupTempFile() {
+        if (tempReversedFile != null && tempReversedFile.exists()) {
+            if (!tempReversedFile.delete()) {
+                log.debug("CSV connector: Failed to delete temporary reversed file {}", tempReversedFile.getAbsolutePath());
+            }
+        }
+        tempReversedFile = null;
+    }
+
+    private File createReversedCopy(File source) throws IOException {
+        File temp = File.createTempFile("pulse-csv-rev-", ".csv");
+        temp.deleteOnExit();
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(new FileInputStream(source), StandardCharsets.UTF_8), 64 * 1024);
+             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(temp), StandardCharsets.UTF_8))) {
+            List<String> prefix = new ArrayList<>();
+            List<String> dataLines = new ArrayList<>();
+            String line;
+            int idx = 0;
+            while ((line = in.readLine()) != null) {
+                if (idx < dataRowIndex) {
+                    prefix.add(line);
+                } else {
+                    dataLines.add(line);
+                }
+                idx++;
+            }
+            for (String prefixLine : prefix) {
+                out.write(prefixLine);
+                out.newLine();
+            }
+            for (int i = dataLines.size() - 1; i >= 0; i--) {
+                out.write(dataLines.get(i));
+                out.newLine();
+            }
+        } catch (IOException e) {
+            if (!temp.delete()) {
+                log.debug("CSV connector: Failed to delete temporary reversed file {} after error", temp.getAbsolutePath());
+            }
+            throw e;
+        }
+        return temp;
+    }
+
+    private long countDataRows(File file, int dataRowIdx) {
+        try (BufferedReader counter = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8), 64 * 1024)) {
+            skipLines(counter, Math.max(0, dataRowIdx));
+            long count = 0;
+            while (counter.readLine() != null) {
+                count++;
+            }
+            return count;
+        } catch (IOException e) {
+            log.warn("CSV connector: Failed to count data rows for file {}", filePath, e);
+            return 0L;
+        }
+    }
+
+    private void incrementProcessedRows() {
+        processedRows++;
+        if (batchStartMillis == 0L) {
+            batchStartMillis = System.currentTimeMillis();
+        }
+        updateProgressPercent();
+        if (processedRows > 0 && processedRows % 1000 == 0) {
+            long now = System.currentTimeMillis();
+            long batchDuration = Math.max(0L, now - batchStartMillis);
+            log.info("CSV connector read {} rows (last 1000 rows in {} ms)", processedRows, batchDuration);
+            batchStartMillis = now;
+        }
+    }
+
+    private void markProgressComplete() {
+        processedRows = Math.max(processedRows, totalRows);
+        progressPercent = 100;
+        batchStartMillis = 0L;
+    }
+
+    private void updateProgressPercent() {
+        if (totalRows <= 0) {
+            return;
+        }
+        long current = Math.min(totalRows, processedRows);
+        progressPercent = (int) Math.min(100, Math.round((current * 100.0) / totalRows));
+    }
+
+    private void resetProgressTracking() {
+        processedRows = 0L;
+        totalRows = 0L;
+        progressPercent = 0;
+        batchStartMillis = 0L;
     }
 
     private char normalizeSeparator(Object raw, char fallback) {
@@ -488,14 +629,6 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
         } catch (Exception e) {
             return Optional.empty();
         }
-    }
-
-    private long computeOutputTimestamp(long rowTs) {
-        if (!timeRealign) {
-            return rowTs;
-        }
-        long dtFile = Math.max(0L, rowTs - fileStartTime);
-        return wallStartTime + (long) Math.floor(dtFile / Math.max(0.0000001, speedMultiplier));
     }
 
     private void emitRow(Map<PulseChannelGroup, List<PulseChannel>> channelsMap,

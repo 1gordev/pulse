@@ -7,6 +7,7 @@ import com.id.pulse.modules.channel.model.enums.PulseAggregationType;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.channel.service.ChannelGroupsCrudService;
 import com.id.pulse.modules.channel.service.ChannelsCrudService;
+import com.id.pulse.modules.connector.model.enums.ConnectorCallReason;
 import com.id.pulse.modules.connector.service.ConnectionManager;
 import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
 import com.id.pulse.modules.datapoints.service.DpAccumulatorsManager;
@@ -79,21 +80,34 @@ public class ChannelPoller {
         // Proceed to actual polling if the time has come
         if (System.currentTimeMillis() > scheduledPollTimes.get(code)) {
             scheduledPollTimes.remove(code);
-            pollGroupThenPublish(group);
+            pollGroupThenPublish(group, ConnectorCallReason.LIVE);
         }
     }
 
     public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group) {
-        return pollGroupThenPublish(group);
+        return replayGroup(group, ConnectorCallReason.RE_PROCESSING);
     }
 
     public CompletableFuture<PollOutcome> replayGroup(String groupCode) {
         var group = channelGroupsCrudService.findByCode(groupCode)
                 .orElseThrow(() -> new IllegalStateException("Group not found: " + groupCode));
-        return pollGroupThenPublish(group);
+        return replayGroup(group, ConnectorCallReason.RE_PROCESSING);
     }
 
-    private CompletableFuture<PollOutcome> pollGroupThenPublish(PulseChannelGroup group) {
+    public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group, ConnectorCallReason reason) {
+        return pollGroupThenPublish(group, reason);
+    }
+
+    public CompletableFuture<PollOutcome> replayGroup(String groupCode, ConnectorCallReason reason) {
+        var group = channelGroupsCrudService.findByCode(groupCode)
+                .orElseThrow(() -> new IllegalStateException("Group not found: " + groupCode));
+        return replayGroup(group, reason);
+    }
+
+    private CompletableFuture<PollOutcome> pollGroupThenPublish(PulseChannelGroup group, ConnectorCallReason reason) {
+        if (reason == ConnectorCallReason.TIME_REALIGN) {
+            throw new UnsupportedOperationException("TIME_REALIGN replay is not supported yet");
+        }
         // Load all channels
         var channels = channelsCrudService.findByChannelGroupCode(group.getCode());
         if (channels.isEmpty()) {
@@ -119,7 +133,7 @@ public class ChannelPoller {
                 java.util.concurrent.CompletableFuture.completedFuture(new java.util.LinkedHashMap<>());
         for (String connectorCode : connectorsOrdered) {
             mergedFuture = mergedFuture.thenCompose(acc -> connectionManager
-                    .queryConnector(connectorCode, Map.of(group, channels))
+                    .queryConnector(connectorCode, Map.of(group, channels), reason)
                     .thenApply(result -> {
                         for (PulseDataPoint dp : result) {
                             acc.put(dp.getPath(), dp);

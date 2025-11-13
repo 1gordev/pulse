@@ -3,6 +3,7 @@ package com.id.pulse.modules.replay.logic;
 import com.id.pulse.modules.channel.model.PulseChannelGroup;
 import com.id.pulse.modules.channel.service.ChannelGroupsCrudService;
 import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.ConnectorCallReason;
 import com.id.pulse.modules.connector.model.enums.CsvTimestampFormat;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorType;
@@ -37,6 +38,7 @@ import java.util.concurrent.CompletionException;
 public class ReplayInjector {
 
     private static final String CSV_PROCESSING_MODE_REPROCESSING = "RE_PROCESSING";
+    private static final String CSV_PROCESSING_MODE_TIME_REALIGN = "TIME_REALIGN";
     private static final String DEFAULT_TIMESTAMP_COLUMN = "timestamp";
     private static final Duration CONNECTOR_READY_TIMEOUT = Duration.ofSeconds(30);
     private static final long CONNECTOR_STATUS_POLL_MS = 200L;
@@ -68,7 +70,8 @@ public class ReplayInjector {
             PulseConnector connector = connectorsCrudService.findByCode(job.getConnectorCode())
                     .orElseThrow(() -> new IllegalArgumentException("Connector not found: " + job.getConnectorCode()));
 
-            validateConnector(connector);
+            ConnectorCallReason callReason = resolveCallReason(connector);
+            validateConnector(connector, callReason);
             CsvBounds bounds = resolveCsvBounds(connector);
             job.setSourceBounds(bounds.startTimestamp(), bounds.endTimestamp());
             job.updateProgress(0);
@@ -86,7 +89,7 @@ public class ReplayInjector {
             }
 
             connectionManager.setReplayMode(connector.getCode(), true);
-            ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds);
+            ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds, callReason);
 
             if (loopResult.cancelled()) {
                 job.setStatus(ReplayJobStatus.CANCELLED);
@@ -123,19 +126,27 @@ public class ReplayInjector {
         }
     }
 
-    private void validateConnector(PulseConnector connector) {
+    private void validateConnector(PulseConnector connector, ConnectorCallReason callReason) {
         if (connector.getType() != PulseConnectorType.CSV) {
             throw new IllegalArgumentException("Connector " + connector.getCode() + " is not CSV");
         }
+        if (callReason == ConnectorCallReason.TIME_REALIGN) {
+            throw new IllegalArgumentException("Connector " + connector.getCode() + " is configured for TIME_REALIGN, which is not supported yet");
+        }
+    }
 
+    private ConnectorCallReason resolveCallReason(PulseConnector connector) {
         Map<String, Object> params = Optional.ofNullable(connector.getParams()).orElse(Map.of());
         String processingMode = Optional.ofNullable(params.get("processingMode"))
                 .map(Object::toString)
                 .map(mode -> mode.toUpperCase(Locale.ROOT))
                 .orElse(CSV_PROCESSING_MODE_REPROCESSING);
-        if (!CSV_PROCESSING_MODE_REPROCESSING.equals(processingMode)) {
-            throw new IllegalArgumentException("Connector " + connector.getCode() + " is not in RE_PROCESSING mode");
-        }
+        return switch (processingMode) {
+            case CSV_PROCESSING_MODE_REPROCESSING -> ConnectorCallReason.RE_PROCESSING;
+            case CSV_PROCESSING_MODE_TIME_REALIGN -> ConnectorCallReason.TIME_REALIGN;
+            default -> throw new IllegalArgumentException("Unsupported processing mode '%s' for connector %s"
+                    .formatted(processingMode, connector.getCode()));
+        };
     }
 
     private CsvBounds resolveCsvBounds(PulseConnector connector) throws IOException {
@@ -237,13 +248,15 @@ public class ReplayInjector {
     private ReprocessLoopResult executeReprocessingLoop(ReplayJob job,
                                                         String connectorCode,
                                                         List<PulseChannelGroup> groups,
-                                                        CsvBounds bounds) throws InterruptedException {
+                                                        CsvBounds bounds,
+                                                        ConnectorCallReason callReason) throws InterruptedException {
         long latestTimestamp = bounds.startTimestamp();
         int idleIterations = 0;
         boolean producedAtLeastOnce = false;
 
         while (true) {
             if (connectionManager.isReplayComplete(connectorCode)) {
+                updateJobProgress(job, connectorCode, latestTimestamp, bounds);
                 return new ReprocessLoopResult(producedAtLeastOnce, true, false);
             }
             if (job.isCancellationRequested()) {
@@ -257,7 +270,7 @@ public class ReplayInjector {
                     return new ReprocessLoopResult(producedAtLeastOnce, false, true);
                 }
                 try {
-                    var outcome = channelPoller.replayGroup(group).join();
+                    var outcome = channelPoller.replayGroup(group, callReason).join();
                     if (outcome != null && outcome.hasData()) {
                         anyData = true;
                         outcome.latestTimestamp().ifPresent(ts -> {
@@ -280,16 +293,17 @@ public class ReplayInjector {
                 producedAtLeastOnce = true;
                 if (batchMaxTs[0] != Long.MIN_VALUE) {
                     latestTimestamp = Math.max(latestTimestamp, batchMaxTs[0]);
-                    job.updateProgress(computeProgress(latestTimestamp, bounds));
-                    if (latestTimestamp >= bounds.endTimestamp()) {
-                        log.info("Reached end timestamp for connector {}", connectorCode);
-                        return new ReprocessLoopResult(true, true, false);
-                    }
+                }
+                updateJobProgress(job, connectorCode, latestTimestamp, bounds);
+                if (batchMaxTs[0] != Long.MIN_VALUE && latestTimestamp >= bounds.endTimestamp()) {
+                    log.info("Reached end timestamp for connector {}", connectorCode);
+                    return new ReprocessLoopResult(true, true, false);
                 }
             } else {
                 idleIterations++;
                 if (idleIterations > LOOP_IDLE_THRESHOLD) {
                     if (connectionManager.isReplayComplete(connectorCode)) {
+                        updateJobProgress(job, connectorCode, latestTimestamp, bounds);
                         log.info("Reached EOF for connector {}", connectorCode);
                         return new ReprocessLoopResult(producedAtLeastOnce, true, false);
                     }
@@ -306,6 +320,15 @@ public class ReplayInjector {
         long clamped = Math.max(bounds.startTimestamp(), Math.min(latestTimestamp, bounds.endTimestamp()));
         double ratio = (double) (clamped - bounds.startTimestamp()) / (double) range;
         return (int) Math.round(Math.min(1.0, Math.max(0.0, ratio)) * 100.0);
+    }
+
+    private void updateJobProgress(ReplayJob job, String connectorCode, long latestTimestamp, CsvBounds bounds) {
+        int runnerPercent = connectionManager.getReplayProgressPercent(connectorCode);
+        if (runnerPercent >= 0) {
+            job.updateProgress(runnerPercent);
+        } else {
+            job.updateProgress(computeProgress(latestTimestamp, bounds));
+        }
     }
 
     private static String stripBom(String value) {

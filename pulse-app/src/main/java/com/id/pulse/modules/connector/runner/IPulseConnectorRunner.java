@@ -4,6 +4,7 @@ import com.id.pulse.model.PulseDataPoint;
 import com.id.pulse.modules.channel.model.PulseChannel;
 import com.id.pulse.modules.channel.model.PulseChannelGroup;
 import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.ConnectorCallReason;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 
 import java.util.List;
@@ -17,6 +18,15 @@ public interface IPulseConnectorRunner {
     PulseConnectorStatus close();
 
     CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap);
+
+    default CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap,
+                                                          ConnectorCallReason reason) {
+        return query(channelsMap);
+    }
+
+    default int getReplayProgressPercent() {
+        return -1;
+    }
 
     default void setReplayMode(boolean replayMode) {
         // default no-op

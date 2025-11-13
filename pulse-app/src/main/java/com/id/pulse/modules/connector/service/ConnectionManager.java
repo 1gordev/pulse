@@ -4,6 +4,7 @@ import com.id.pulse.model.PulseDataPoint;
 import com.id.pulse.modules.channel.model.PulseChannel;
 import com.id.pulse.modules.channel.model.PulseChannelGroup;
 import com.id.pulse.modules.connector.model.PulseConnector;
+import com.id.pulse.modules.connector.model.enums.ConnectorCallReason;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorStatus;
 import com.id.pulse.modules.connector.model.enums.PulseConnectorType;
 import com.id.pulse.modules.connector.runner.IPulseConnectorRunner;
@@ -100,12 +101,14 @@ public class ConnectionManager {
     }
 
     @Async
-    public CompletableFuture<List<PulseDataPoint>> queryConnector(String code, Map<PulseChannelGroup, List<PulseChannel>> channels) {
+    public CompletableFuture<List<PulseDataPoint>> queryConnector(String code,
+                                                                  Map<PulseChannelGroup, List<PulseChannel>> channels,
+                                                                  ConnectorCallReason reason) {
         // If there's already an instance, clean it up
         if (instances.containsKey(code)) {
             if (connectorsRegistry.getStatus(code) == PulseConnectorStatus.CONNECTED) {
                 var instance = instances.get(code);
-                return instance.query(channels);
+                return instance.query(channels, reason);
             }
         } else {
             long now = System.currentTimeMillis();
@@ -137,6 +140,17 @@ public class ConnectionManager {
             }
         }
         return false;
+    }
+
+    public int getReplayProgressPercent(String code) {
+        IPulseConnectorRunner runner = instances.get(code);
+        if (runner != null) {
+            try {
+                return runner.getReplayProgressPercent();
+            } catch (Exception ignored) {
+            }
+        }
+        return -1;
     }
 
     public Class<? extends IPulseConnectorRunner> getConnectorClass(String connectorCode) {
