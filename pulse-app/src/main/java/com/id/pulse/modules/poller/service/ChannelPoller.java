@@ -80,31 +80,39 @@ public class ChannelPoller {
         // Proceed to actual polling if the time has come
         if (System.currentTimeMillis() > scheduledPollTimes.get(code)) {
             scheduledPollTimes.remove(code);
-            pollGroupThenPublish(group, ConnectorCallReason.LIVE);
+            pollGroupThenPublish(group, ConnectorCallReason.LIVE, null);
         }
     }
 
     public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group) {
-        return replayGroup(group, ConnectorCallReason.RE_PROCESSING);
+        return replayGroup(group, ConnectorCallReason.RE_PROCESSING, null);
     }
 
     public CompletableFuture<PollOutcome> replayGroup(String groupCode) {
         var group = channelGroupsCrudService.findByCode(groupCode)
                 .orElseThrow(() -> new IllegalStateException("Group not found: " + groupCode));
-        return replayGroup(group, ConnectorCallReason.RE_PROCESSING);
+        return replayGroup(group, ConnectorCallReason.RE_PROCESSING, null);
     }
 
     public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group, ConnectorCallReason reason) {
-        return pollGroupThenPublish(group, reason);
+        return pollGroupThenPublish(group, reason, null);
     }
 
     public CompletableFuture<PollOutcome> replayGroup(String groupCode, ConnectorCallReason reason) {
         var group = channelGroupsCrudService.findByCode(groupCode)
                 .orElseThrow(() -> new IllegalStateException("Group not found: " + groupCode));
-        return replayGroup(group, reason);
+        return replayGroup(group, reason, null);
     }
 
-    private CompletableFuture<PollOutcome> pollGroupThenPublish(PulseChannelGroup group, ConnectorCallReason reason) {
+    public CompletableFuture<PollOutcome> replayGroup(PulseChannelGroup group,
+                                                      ConnectorCallReason reason,
+                                                      String reprocessingSessionId) {
+        return pollGroupThenPublish(group, reason, reprocessingSessionId);
+    }
+
+    private CompletableFuture<PollOutcome> pollGroupThenPublish(PulseChannelGroup group,
+                                                                ConnectorCallReason reason,
+                                                                String reprocessingSessionId) {
         if (reason == ConnectorCallReason.TIME_REALIGN) {
             throw new UnsupportedOperationException("TIME_REALIGN replay is not supported yet");
         }
@@ -179,7 +187,7 @@ public class ChannelPoller {
                         return PollOutcome.empty();
                     }
 
-                    publish(List.of(group), toPublish);
+                    publish(List.of(group), toPublish, reason, reprocessingSessionId);
 
                     long latestTs = toPublish.stream()
                             .mapToLong(PulseDataPoint::getTms)
@@ -280,7 +288,10 @@ public class ChannelPoller {
         return aggregatedPoints;
     }
 
-    private void publish(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints) {
+    private void publish(List<PulseChannelGroup> groups,
+                         List<PulseDataPoint> dataPoints,
+                         ConnectorCallReason reason,
+                         String reprocessingSessionId) {
         try {
             latestValuesBucket.writeDataSet(groups, dataPoints);
         } catch (Exception e) {
@@ -295,9 +306,13 @@ public class ChannelPoller {
             return;
         }
 
+        boolean reprocessing = reason == ConnectorCallReason.RE_PROCESSING
+                || reason == ConnectorCallReason.TIME_REALIGN;
+        String hookSessionId = reprocessing ? reprocessingSessionId : null;
+
         try {
             // Execute pre-transformers hooks
-            measureHookService.runHooks(PulseMeasureRegisterHookType.BEFORE_ALL_TRANSFORMERS);
+            measureHookService.runHooks(PulseMeasureRegisterHookType.BEFORE_ALL_TRANSFORMERS, reprocessing, hookSessionId);
         } catch (Exception e) {
             log.error("Error running measure hooks", e);
             return;
@@ -313,7 +328,7 @@ public class ChannelPoller {
 
         try {
             // Execute post-transformers hooks
-            measureHookService.runHooks(PulseMeasureRegisterHookType.AFTER_ALL_TRANSFORMERS);
+            measureHookService.runHooks(PulseMeasureRegisterHookType.AFTER_ALL_TRANSFORMERS, reprocessing, hookSessionId);
         } catch (Exception e) {
             log.error("Error running measure hooks", e);
             return;

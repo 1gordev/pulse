@@ -15,5 +15,7 @@ public class PulseMeasureRegisterHook {
     private PulseMeasureRegisterHookType type;
     private String audienceId;
     private String postEndPoint;
+    private Boolean reprocessing;
+    private String reprocessingSessionId;
 
 }

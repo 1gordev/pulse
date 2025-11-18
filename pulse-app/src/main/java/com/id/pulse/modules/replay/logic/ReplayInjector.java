@@ -14,6 +14,8 @@ import com.id.pulse.modules.orchestrator.service.ConnectorsRegistry;
 import com.id.pulse.modules.poller.service.ChannelPoller;
 import com.id.pulse.modules.replay.model.ReplayJob;
 import com.id.pulse.modules.replay.model.ReplayJobStatus;
+import com.id.pulse.modules.replay.model.ReprocessingSessionStatus;
+import com.id.pulse.modules.replay.service.ReprocessingStatusNotifier;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.context.annotation.Scope;
@@ -49,23 +51,27 @@ public class ReplayInjector {
     private final ConnectionManager connectionManager;
     private final ConnectorsRegistry connectorsRegistry;
     private final ChannelPoller channelPoller;
+    private final ReprocessingStatusNotifier reprocessingStatusNotifier;
 
     public ReplayInjector(ConnectorsCrudService connectorsCrudService,
                           ChannelGroupsCrudService channelGroupsCrudService,
                           ConnectionManager connectionManager,
                           ConnectorsRegistry connectorsRegistry,
-                          ChannelPoller channelPoller) {
+                          ChannelPoller channelPoller,
+                          ReprocessingStatusNotifier reprocessingStatusNotifier) {
         this.connectorsCrudService = connectorsCrudService;
         this.channelGroupsCrudService = channelGroupsCrudService;
         this.connectionManager = connectionManager;
         this.connectorsRegistry = connectorsRegistry;
         this.channelPoller = channelPoller;
+        this.reprocessingStatusNotifier = reprocessingStatusNotifier;
     }
 
     public void reprocess(ReplayJob job) {
         log.info("Starting reprocessing for connector {}", job.getConnectorCode());
         try {
             job.setStatus(ReplayJobStatus.RUNNING);
+            reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.STARTED);
 
             PulseConnector connector = connectorsCrudService.findByCode(job.getConnectorCode())
                     .orElseThrow(() -> new IllegalArgumentException("Connector not found: " + job.getConnectorCode()));
@@ -85,6 +91,7 @@ public class ReplayInjector {
                 job.setStatus(ReplayJobStatus.CANCELLED);
                 job.setStatusMessage("Reprocessing cancelled");
                 log.info("Reprocessing cancelled before start for connector {}", connector.getCode());
+                reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.CANCELLED);
                 return;
             }
 
@@ -95,6 +102,7 @@ public class ReplayInjector {
                 job.setStatus(ReplayJobStatus.CANCELLED);
                 job.setStatusMessage("Reprocessing cancelled");
                 log.info("Reprocessing cancelled for connector {}", connector.getCode());
+                reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.CANCELLED);
                 return;
             }
 
@@ -109,6 +117,7 @@ public class ReplayInjector {
             job.setStatus(ReplayJobStatus.COMPLETED);
             job.setStatusMessage("Reprocessing completed");
             log.info("Reprocessing completed for connector {}", connector.getCode());
+            reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.COMPLETED);
         } catch (Exception e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -116,6 +125,7 @@ public class ReplayInjector {
             job.setStatus(ReplayJobStatus.FAILED);
             job.setStatusMessage(e.getMessage());
             log.error("Reprocessing failed for connector {}: {}", job.getConnectorCode(), e.getMessage(), e);
+            reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.FAILED);
         } finally {
             try {
                 connectionManager.setReplayMode(job.getConnectorCode(), false);
@@ -270,7 +280,7 @@ public class ReplayInjector {
                     return new ReprocessLoopResult(producedAtLeastOnce, false, true);
                 }
                 try {
-                    var outcome = channelPoller.replayGroup(group, callReason).join();
+                    var outcome = channelPoller.replayGroup(group, callReason, job.getId()).join();
                     if (outcome != null && outcome.hasData()) {
                         anyData = true;
                         outcome.latestTimestamp().ifPresent(ts -> {

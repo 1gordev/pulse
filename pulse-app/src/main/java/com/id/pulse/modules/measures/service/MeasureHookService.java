@@ -32,12 +32,16 @@ public class MeasureHookService {
     }
 
     public void runHooks(PulseMeasureRegisterHookType type) {
-        hooksMap.values().stream()
-                .filter(hook -> hook.getType() == type)
-                .forEach(this::callHook);
+        runHooks(type, false, null);
     }
 
-    private void callHook(PulseMeasureRegisterHook hook) {
+    public void runHooks(PulseMeasureRegisterHookType type, boolean reprocessing, String reprocessingSessionId) {
+        hooksMap.values().stream()
+                .filter(hook -> hook.getType() == type)
+                .forEach(hook -> callHook(hook, reprocessing, reprocessingSessionId));
+    }
+
+    private void callHook(PulseMeasureRegisterHook hook, boolean reprocessing, String reprocessingSessionId) {
         try {
             // Generate a short-lived token for the hook call
             String token = jwtService.generateToken("system", Set.of(DefaultRoles.ROOT), Duration.ofMinutes(1));
@@ -45,7 +49,15 @@ public class MeasureHookService {
             headers.setBearerAuth(token);
 
             // Prepare the request entity with headers and execute
-            var request = new HttpEntity<>(hook, headers);
+            PulseMeasureRegisterHook payload = PulseMeasureRegisterHook.builder()
+                    .type(hook.getType())
+                    .audienceId(hook.getAudienceId())
+                    .postEndPoint(hook.getPostEndPoint())
+                    .reprocessing(reprocessing)
+                    .reprocessingSessionId(reprocessingSessionId)
+                    .build();
+
+            var request = new HttpEntity<>(payload, headers);
             restTemplate.postForEntity(hook.getPostEndPoint(), request, Void.class);
         } catch (Exception e) {
             log.error("Error calling hook: {}", hook, e);

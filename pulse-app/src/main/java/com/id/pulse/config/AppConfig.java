@@ -25,4 +25,7 @@ public class AppConfig {
 
     @Value("${pulse.connectors-upload-folder:/var/local/iris3/uploads}")
     private String pulseConnectorsUploadFolder;
+
+    @Value("${iris.backend.base-url:http://localhost:10180}")
+    private String irisBackendBaseUrl;
 }
