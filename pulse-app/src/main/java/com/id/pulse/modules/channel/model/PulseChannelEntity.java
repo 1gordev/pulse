@@ -22,6 +22,7 @@ public class PulseChannelEntity {
     public static final String PATH = "path";
     public static final String CHANNEL_GROUP_CODE = "channelGroupCode";
     public static final String SOURCE_PATH = "sourcePath";
+    public static final String UNIT_OF_MEASURE = "unitOfMeasure";
     public static final String DATA_TYPE = "dataType";
     public static final String VALIDITY = "validity";
     public static final String PRECISION = "precision";
@@ -40,6 +41,8 @@ public class PulseChannelEntity {
 
     @Indexed
     private String sourcePath;
+
+    private String unitOfMeasure;
 
     @Indexed
     private PulseDataType dataType;

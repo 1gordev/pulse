@@ -27,7 +27,7 @@ public class PulseMeasure {
     @Builder.Default
     private String description = "";
 
-    private String unitOfMeasureCode;
+    private String unitOfMeasure;
 
     @Builder.Default
     private PulseDataType dataType = PulseDataType.DOUBLE;

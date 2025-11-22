@@ -17,6 +17,7 @@ public class PulseChannel {
     private String path;
     private String channelGroupCode;
     private String sourcePath;
+    private String unitOfMeasure;
 
     @Builder.Default
     private PulseDataType dataType = PulseDataType.DOUBLE;

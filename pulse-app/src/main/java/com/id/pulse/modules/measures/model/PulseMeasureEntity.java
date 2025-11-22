@@ -25,7 +25,7 @@ public class PulseMeasureEntity {
     public static final String PATH = "path";
     public static final String UPSTREAMS = "upstreams";
     public static final String DESCRIPTION = "description";
-    public static final String UNIT_OF_MEASURE_CODE = "unitOfMeasureCode";
+    public static final String UNIT_OF_MEASURE = "unitOfMeasure";
     public static final String DATA_TYPE = "dataType";
     public static final String VALIDITY = "validity";
     public static final String PRECISION = "precision";
@@ -43,7 +43,7 @@ public class PulseMeasureEntity {
     private List<PulseUpStream> upstreams;
 
     private String description;
-    private String unitOfMeasureCode;
+    private String unitOfMeasure;
 
     private PulseDataType dataType;
     private Long validity;
