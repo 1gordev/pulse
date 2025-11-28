@@ -29,7 +29,7 @@ public class MeasureTransformerManager {
         this.measuresCrudService = measuresCrudService;
     }
 
-    public void run(PulseChannelGroup group, List<PulseDataPoint> dps) {
+    public void run(PulseChannelGroup group, List<PulseDataPoint> dps, boolean reprocessing, String reprocessingSessionId) {
         if (group == null) {
             log.error("Group is null");
             return;
@@ -63,7 +63,9 @@ public class MeasureTransformerManager {
         var metadata = new TransformerRun(
                 dps,
                 tms,
-                group.getInterval()
+                group.getInterval(),
+                reprocessing,
+                reprocessingSessionId
         );
 
         try {

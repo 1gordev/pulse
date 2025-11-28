@@ -325,7 +325,7 @@ public class ChannelPoller {
 
         // Run transformers
         try {
-            runMeasureTransformers(groups, dataPoints);
+            runMeasureTransformers(groups, dataPoints, reprocessing, hookSessionId);
         } catch (Exception e) {
             log.error("Error running measure transformers", e);
             return;
@@ -340,14 +340,14 @@ public class ChannelPoller {
         }
     }
 
-    private void runMeasureTransformers(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints) {
+    private void runMeasureTransformers(List<PulseChannelGroup> groups, List<PulseDataPoint> dataPoints, boolean reprocessing, String hookSessionId) {
         groups.forEach(group -> {
             var dps = dataPoints.stream().filter(dp -> dp.getGroupCode().equals(group.getCode())).toList();
             if (dps.isEmpty()) {
                 return;
             }
 
-            measureTransformerManager.run(group, dps);
+            measureTransformerManager.run(group, dps, reprocessing, hookSessionId);
         });
     }
 

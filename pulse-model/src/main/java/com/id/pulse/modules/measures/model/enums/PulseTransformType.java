@@ -7,6 +7,7 @@ public enum PulseTransformType {
     MAX_LATEST,
     SUM_LATEST,
     AVG_LATEST,
-    JAVASCRIPT
+    JAVASCRIPT,
+    REST
 
 }

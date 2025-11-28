@@ -6,12 +6,10 @@ import com.id.pulse.modules.alarms.PulseAlarm;
 import com.id.pulse.modules.alarms.service.AlarmsCrudService;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
-import com.id.pulse.modules.measures.model.ScriptEvaluatorResult;
-import com.id.pulse.modules.measures.model.TransformerRun;
-import com.id.pulse.modules.measures.model.PulseMeasure;
-import com.id.pulse.modules.measures.model.PulseUpStream;
+import com.id.pulse.modules.measures.model.*;
 import com.id.pulse.modules.measures.model.enums.PulseSourceType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
+import com.id.pulse.modules.measures.service.MeasureHookService;
 import com.id.pulse.modules.parser.PulseDataMatrixParser;
 import com.id.pulse.modules.poller.service.LatestValuesBucket;
 import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
@@ -49,30 +47,47 @@ public class MeasureTransformer {
             Thread.ofVirtual().factory()
     );
     private final LatestValuesBucket latestValuesBucket;
+    private final MeasureHookService measureHookService;
+
+    // Tracks BN measures executed once per reprocessing session for ON_REPROCESSING_INIT
+    private final Set<String> bnReprocessingSeen = ConcurrentHashMap.newKeySet();
+
+    private static final String BNET_COMPUTATION_MODE_CONTINUOUS = "CONTINUOUS";
+    private static final String BNET_COMPUTATION_MODE_ON_REPROCESSING_INIT = "ON_REPROCESSING_INIT";
+    private static final String BNET_COMPUTATION_MODE_KEY = "BNET_COMPUTATION_MODE";
 
     @Autowired
     public MeasureTransformer(AlarmsCrudService alarmsCrudService,
                               MeasuresCrudService measuresCrudService,
                               DataIngestor dataIngestor,
                               MeasureJsEvaluator measureJsEvaluator,
-                              LatestValuesBucket latestValuesBucket) {
+                              LatestValuesBucket latestValuesBucket,
+                              MeasureHookService measureHookService) {
         this.alarmsCrudService = alarmsCrudService;
         this.measuresCrudService = measuresCrudService;
         this.dataIngestor = dataIngestor;
         this.measureJsEvaluator = measureJsEvaluator;
         this.latestValuesBucket = latestValuesBucket;
+        this.measureHookService = measureHookService;
     }
 
     public List<PulseDataPoint> execute(TransformerRun run) {
         Map<String, PulseMeasure> measuresMap = measuresCrudService.findAll().stream()
                 .collect(Collectors.toMap(PulseMeasure::getPath, Function.identity()));
 
+        // Merge externally provided measures (hooks win on conflict)
+        measureHookService.fetchProvideMeasureList().forEach(m -> {
+            if (m != null && m.getPath() != null) {
+                measuresMap.put(m.getPath(), m);
+            }
+        });
+
         // TODO: upstream should load valuse considering run.getTms()
         // Get latest values for channels
         Map<String, PulseDataPoint> channelValues = getLatestValues(run.getChannelUpStreams());
 
         // Build ordered list and get dependency map
-        BuildOrderListResult buildOrderListResult = buildOrderedList(measuresMap, channelValues.keySet().stream().toList());
+        BuildOrderListResult buildOrderListResult = buildOrderedList(measuresMap, channelValues.keySet().stream().toList(), run);
         List<PulseMeasure> measures = buildOrderListResult.measures();
         Map<String, Set<String>> origDependencies = buildOrderListResult.origDeps();
 
@@ -338,7 +353,7 @@ public class MeasureTransformer {
     }
 
     private BuildOrderListResult buildOrderedList
-            (Map<String, PulseMeasure> measureMap, List<String> channelPaths) {
+            (Map<String, PulseMeasure> measureMap, List<String> channelPaths, TransformerRun run) {
         // Build inverse graphs
         Map<String, List<String>> channelChildren = new HashMap<>();
         Map<String, List<String>> measureChildren = new HashMap<>();
@@ -360,6 +375,19 @@ public class MeasureTransformer {
             for (String m : channelChildren.getOrDefault(ch, Collections.emptyList())) {
                 if (impacted.add(m)) queue.add(m);
             }
+        }
+
+        // Force CONTINUOUS BN measures every run
+        impacted.addAll(selectBnByMode(measureMap, BNET_COMPUTATION_MODE_CONTINUOUS));
+
+        // ON_REPROCESSING_INIT: only once per session
+        if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
+            selectBnByMode(measureMap, BNET_COMPUTATION_MODE_ON_REPROCESSING_INIT).forEach(mPath -> {
+                String key = mPath + "#" + run.getReprocessingSessionId();
+                if (bnReprocessingSeen.add(key)) {
+                    impacted.add(mPath);
+                }
+            });
         }
         // Propagate through measure dependencies
         while (!queue.isEmpty()) {
@@ -415,6 +443,19 @@ public class MeasureTransformer {
                 .map(measureMap::get)
                 .collect(Collectors.toList());
         return new BuildOrderListResult(orderedMeasures, origDeps);
+    }
+
+    private List<String> selectBnByMode(Map<String, PulseMeasure> measureMap, String mode) {
+        if (mode == null) {
+            return List.of();
+        }
+        return measureMap.values().stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getDetails() != null)
+                .filter(m -> mode.equals(m.getDetails().get(BNET_COMPUTATION_MODE_KEY)))
+                .map(PulseMeasure::getPath)
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     private List<PulseDataPoint> applyTransformations(
@@ -504,7 +545,9 @@ public class MeasureTransformer {
 
             Object safeVal = getSafeValue(measure.getDataType());
             Object val = safeVal;
-            if (!resolvedDeps.isEmpty()) {
+            if (measure.getTransformType() == PulseTransformType.REST) {
+                val = transformRest(tms, measure, resolvedDeps);
+            } else if (!resolvedDeps.isEmpty()) {
                 val = switch (measure.getTransformType()) {
                     case COPY_LATEST -> resolvedDeps.getFirst().getVal();
                     case MIN_LATEST -> transformMinLatest(measure.getDataType(), resolvedDeps);
@@ -512,6 +555,7 @@ public class MeasureTransformer {
                     case SUM_LATEST -> transformSumLatest(measure.getDataType(), resolvedDeps);
                     case AVG_LATEST -> transformAvgLatest(measure.getDataType(), resolvedDeps);
                     case JAVASCRIPT -> transformJavaScript(tms, measure, currentValue, resolvedDeps, null);
+                    case REST -> transformRest(tms, measure, resolvedDeps);
                 };
             } else if (measure.getTransformType() == PulseTransformType.JAVASCRIPT) {
                 // Javascript transformations are always applied
@@ -545,6 +589,29 @@ public class MeasureTransformer {
                     .val(getSafeValue(measure.getDataType()))
                     .build();
         }
+    }
+
+    private Object transformRest(long tms, PulseMeasure measure, List<PulseDataPoint> deps) {
+        if (measureHookService == null) {
+            return getSafeValue(measure.getDataType());
+        }
+
+        // Build upstream map (latest per path) from resolved deps
+        Map<String, PulseDataPoint> latestByPath = new HashMap<>();
+        deps.forEach(dp -> latestByPath.merge(dp.getPath(), dp,
+                (a, b) -> a.getTms() >= b.getTms() ? a : b));
+
+        Map<String, Object> upstreamValues = latestByPath.values().stream()
+                .collect(Collectors.toMap(PulseDataPoint::getPath, PulseDataPoint::getVal));
+
+        var payload = PulseMeasureRestCompute.builder()
+                .measurePath(measure.getPath())
+                .upstreamValues(upstreamValues)
+                .tms(tms)
+                .build();
+
+        return measureHookService.computeMeasure(payload)
+                .orElseGet(() -> getSafeValue(measure.getDataType()));
     }
 
     private void handleAlarmTransition(PulseMeasure measure, long tms, PulseDataPoint
