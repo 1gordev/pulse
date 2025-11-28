@@ -309,10 +309,15 @@ public class ChannelPoller {
         boolean reprocessing = reason == ConnectorCallReason.RE_PROCESSING
                 || reason == ConnectorCallReason.TIME_REALIGN;
         String hookSessionId = reprocessing ? reprocessingSessionId : null;
+        Long hookReplayTimestamp = null;
+        if (reprocessing && dataPoints != null && !dataPoints.isEmpty()) {
+            var minTs = dataPoints.stream().mapToLong(PulseDataPoint::getTms).min();
+            hookReplayTimestamp = minTs.isPresent() ? minTs.getAsLong() : null;
+        }
 
         try {
             // Execute pre-transformers hooks
-            measureHookService.runHooks(PulseMeasureRegisterHookType.BEFORE_ALL_TRANSFORMERS, reprocessing, hookSessionId);
+            measureHookService.runHooks(PulseMeasureRegisterHookType.BEFORE_ALL_TRANSFORMERS, reprocessing, hookSessionId, hookReplayTimestamp);
         } catch (Exception e) {
             log.error("Error running measure hooks", e);
             return;
@@ -328,7 +333,7 @@ public class ChannelPoller {
 
         try {
             // Execute post-transformers hooks
-            measureHookService.runHooks(PulseMeasureRegisterHookType.AFTER_ALL_TRANSFORMERS, reprocessing, hookSessionId);
+            measureHookService.runHooks(PulseMeasureRegisterHookType.AFTER_ALL_TRANSFORMERS, reprocessing, hookSessionId, hookReplayTimestamp);
         } catch (Exception e) {
             log.error("Error running measure hooks", e);
             return;

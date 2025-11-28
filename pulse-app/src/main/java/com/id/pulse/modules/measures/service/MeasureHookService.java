@@ -32,16 +32,26 @@ public class MeasureHookService {
     }
 
     public void runHooks(PulseMeasureRegisterHookType type) {
-        runHooks(type, false, null);
+        runHooks(type, false, null, null);
     }
 
     public void runHooks(PulseMeasureRegisterHookType type, boolean reprocessing, String reprocessingSessionId) {
-        hooksMap.values().stream()
-                .filter(hook -> hook.getType() == type)
-                .forEach(hook -> callHook(hook, reprocessing, reprocessingSessionId));
+        runHooks(type, reprocessing, reprocessingSessionId, null);
     }
 
-    private void callHook(PulseMeasureRegisterHook hook, boolean reprocessing, String reprocessingSessionId) {
+    public void runHooks(PulseMeasureRegisterHookType type,
+                         boolean reprocessing,
+                         String reprocessingSessionId,
+                         Long reprocessingTimestamp) {
+        hooksMap.values().stream()
+                .filter(hook -> hook.getType() == type)
+                .forEach(hook -> callHook(hook, reprocessing, reprocessingSessionId, reprocessingTimestamp));
+    }
+
+    private void callHook(PulseMeasureRegisterHook hook,
+                          boolean reprocessing,
+                          String reprocessingSessionId,
+                          Long reprocessingTimestamp) {
         try {
             // Generate a short-lived token for the hook call
             String token = jwtService.generateToken("system", Set.of(DefaultRoles.ROOT), Duration.ofMinutes(1));
@@ -55,6 +65,7 @@ public class MeasureHookService {
                     .postEndPoint(hook.getPostEndPoint())
                     .reprocessing(reprocessing)
                     .reprocessingSessionId(reprocessingSessionId)
+                    .reprocessingTimestamp(reprocessingTimestamp)
                     .build();
 
             var request = new HttpEntity<>(payload, headers);

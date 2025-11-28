@@ -17,5 +17,10 @@ public class PulseMeasureRegisterHook {
     private String postEndPoint;
     private Boolean reprocessing;
     private String reprocessingSessionId;
+    /**
+     * When reprocessing, carries the original event timestamp (epoch millis) read from the connector source (e.g. CSV).
+     * Null for live hooks.
+     */
+    private Long reprocessingTimestamp;
 
 }
