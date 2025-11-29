@@ -546,6 +546,7 @@ public class MeasureTransformer {
             Object safeVal = getSafeValue(measure.getDataType());
             Object val = safeVal;
             if (measure.getTransformType() == PulseTransformType.REST) {
+                //  This ensure transformREST is called even if resolvedDeps is empty
                 val = transformRest(tms, measure, resolvedDeps);
             } else if (!resolvedDeps.isEmpty()) {
                 val = switch (measure.getTransformType()) {
@@ -555,7 +556,7 @@ public class MeasureTransformer {
                     case SUM_LATEST -> transformSumLatest(measure.getDataType(), resolvedDeps);
                     case AVG_LATEST -> transformAvgLatest(measure.getDataType(), resolvedDeps);
                     case JAVASCRIPT -> transformJavaScript(tms, measure, currentValue, resolvedDeps, null);
-                    case REST -> transformRest(tms, measure, resolvedDeps);
+                    default -> throw new IllegalStateException("Unexpected value: " + measure.getTransformType());
                 };
             } else if (measure.getTransformType() == PulseTransformType.JAVASCRIPT) {
                 // Javascript transformations are always applied
