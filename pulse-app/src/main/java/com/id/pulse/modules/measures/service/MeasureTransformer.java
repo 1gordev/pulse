@@ -82,8 +82,8 @@ public class MeasureTransformer {
             }
         });
 
-        // TODO: upstream should load valuse considering run.getTms()
-        // Get latest values for channels
+        //  Get latest values for channels - pay attention, the latest value is referred to the TMS in the 'run'.
+        //  This means that when we got here for a reprocessing session, the TMS comes from the reprocessing and can actually be in the past
         Map<String, PulseDataPoint> channelValues = getLatestValues(run.getChannelUpStreams());
 
         // Build ordered list and get dependency map
@@ -377,15 +377,18 @@ public class MeasureTransformer {
             }
         }
 
-        // Force CONTINUOUS BN measures every run
-        impacted.addAll(selectBnByMode(measureMap, BNET_COMPUTATION_MODE_CONTINUOUS));
+        // Force CONTINUOUS BN measures every run (and enqueue so downstream deps propagate)
+        selectBnByMode(measureMap, BNET_COMPUTATION_MODE_CONTINUOUS)
+                .forEach(m -> {
+                    if (impacted.add(m)) queue.add(m);
+                });
 
         // ON_REPROCESSING_INIT: only once per session
         if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
             selectBnByMode(measureMap, BNET_COMPUTATION_MODE_ON_REPROCESSING_INIT).forEach(mPath -> {
                 String key = mPath + "#" + run.getReprocessingSessionId();
-                if (bnReprocessingSeen.add(key)) {
-                    impacted.add(mPath);
+                if (bnReprocessingSeen.add(key) && impacted.add(mPath)) {
+                    queue.add(mPath);
                 }
             });
         }
