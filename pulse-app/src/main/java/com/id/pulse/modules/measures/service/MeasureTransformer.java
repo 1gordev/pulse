@@ -108,7 +108,13 @@ public class MeasureTransformer {
                 .toList();
 
         // Apply transformation logic on ordered measures with dependencies
-        List<PulseDataPoint> transformed = applyTransformations(measures, currentValues, origDependencies, channelValues, run.getTms());
+        List<PulseDataPoint> transformed = applyTransformations(
+                measures,
+                currentValues,
+                origDependencies,
+                channelValues,
+                run.getTms(),
+                run.getInterval());
 
         // Make a map of transformed data points indexed by path
         Map<String, PulseDataPoint> transformedMap = transformed.stream()
@@ -466,7 +472,8 @@ public class MeasureTransformer {
             List<PulseDataPoint> currentValues,
             Map<String, Set<String>> origDeps,
             Map<String, PulseDataPoint> channelValues,
-            long tms) {
+            long tms,
+            long intervalMs) {
 
         Map<String, CompletableFuture<PulseDataPoint>> futures = new HashMap<>();
 
@@ -523,7 +530,7 @@ public class MeasureTransformer {
                                     .build();
                         }
 
-                        return transformMeasure(m, currentDataPoint, tms, allDeps);
+                        return transformMeasure(m, currentDataPoint, tms, intervalMs, allDeps);
                     }, executor);
 
             futures.put(m.getPath(), meFuture);
@@ -542,7 +549,7 @@ public class MeasureTransformer {
      * to fetch upstream values and apply PulseTransformType logic.
      */
     private PulseDataPoint transformMeasure(PulseMeasure measure, PulseDataPoint currentValue,
-                                            long tms, List<PulseDataPoint> resolvedDeps) {
+                                            long tms, long intervalMs, List<PulseDataPoint> resolvedDeps) {
         try {
             log.trace("Transforming measure: {}", measure.getPath());
 
@@ -550,7 +557,7 @@ public class MeasureTransformer {
             Object val = safeVal;
             if (measure.getTransformType() == PulseTransformType.REST) {
                 //  This ensure transformREST is called even if resolvedDeps is empty
-                val = transformRest(tms, measure, resolvedDeps);
+                val = transformRest(tms, intervalMs, measure, resolvedDeps);
             } else if (!resolvedDeps.isEmpty()) {
                 val = switch (measure.getTransformType()) {
                     case COPY_LATEST -> resolvedDeps.getFirst().getVal();
@@ -595,7 +602,7 @@ public class MeasureTransformer {
         }
     }
 
-    private Object transformRest(long tms, PulseMeasure measure, List<PulseDataPoint> deps) {
+    private Object transformRest(long tms, long intervalMs, PulseMeasure measure, List<PulseDataPoint> deps) {
         if (measureHookService == null) {
             return getSafeValue(measure.getDataType());
         }
@@ -612,6 +619,7 @@ public class MeasureTransformer {
                 .measurePath(measure.getPath())
                 .upstreamValues(upstreamValues)
                 .tms(tms)
+                .intervalMs(intervalMs)
                 .build();
 
         return measureHookService.computeMeasure(payload)

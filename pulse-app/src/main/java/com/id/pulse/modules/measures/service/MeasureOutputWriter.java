@@ -73,8 +73,10 @@ public class MeasureOutputWriter {
                 .filter(ts -> ts > 0)
                 .orElseGet(() -> Instant.now().toEpochMilli());
 
-        long interval = Optional.ofNullable(measure.getValidity())
+        // Prefer explicitly propagated sampling interval; fall back to measure validity; then to default.
+        long interval = Optional.ofNullable(request.getIntervalMs())
                 .filter(v -> v != null && v > 0)
+                .or(() -> Optional.ofNullable(measure.getValidity()).filter(v -> v != null && v > 0))
                 .orElse(DEFAULT_INTERVAL_MS);
 
         PulseDataPoint dp = PulseDataPoint.builder()
@@ -92,8 +94,9 @@ public class MeasureOutputWriter {
 
         latestValuesBucket.writeDataPoint(List.of(virtualGroup), dp);
 
+        String metadataCacheKey = "%s@%d".formatted(measure.getPath(), interval);
         PulseChunkMetadata metadata = metadataCache.computeIfAbsent(
-                measure.getPath(),
+                metadataCacheKey,
                 key -> dataIngestor.prepareMetadata(
                         MeasureTransformer.MEASURES_GROUP,
                         measure.getPath(),

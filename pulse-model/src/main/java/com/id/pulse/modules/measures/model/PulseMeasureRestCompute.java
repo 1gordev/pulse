@@ -18,4 +18,11 @@ public class PulseMeasureRestCompute {
     private Map<String, Object> upstreamValues;
 
     private Long tms;
+
+    /**
+     * Optional sampling interval (ms) of the triggering acquisition group.
+     * When provided, downstream writers (e.g., BN outputs) can store results
+     * using the same cadence instead of falling back to defaults.
+     */
+    private Long intervalMs;
 }

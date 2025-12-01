@@ -73,7 +73,7 @@ public class DataExtractorProcessor {
         var channelGroupsMap = channelGroupsCrudService.findByCodes(new ArrayList<>(channelGroupCodes)).stream().collect(Collectors.toMap(PulseChannelGroup::getCode, gr -> gr));
 
         // Find channels metadata
-        var channelMetadataMap = chunkMetadataCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseChunkMetadata::getPath, meta -> meta));
+        var channelMetadataMap = buildMetadataMap(chunkMetadataCrudService.findByPaths(paths));
 
         // Process group by group
         List<CompletableFuture<PulseDataMatrix>> channelsTasks;
@@ -87,7 +87,7 @@ public class DataExtractorProcessor {
         var measuresMap = measuresCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseMeasure::getPath, ch -> ch));
 
         // Find measures metadata
-        var measureMetadataMap = chunkMetadataCrudService.findByPaths(paths).stream().collect(Collectors.toMap(PulseChunkMetadata::getPath, meta -> meta));
+        var measureMetadataMap = buildMetadataMap(chunkMetadataCrudService.findByPaths(paths));
 
         // Process group by group
         CompletableFuture<PulseDataMatrix> measuresTask;
@@ -251,6 +251,35 @@ public class DataExtractorProcessor {
         }
 
         return matrixBuilder.build();
+    }
+
+    /**
+     * Builds a path-indexed metadata map, resolving duplicates by keeping the lowest samplingRate
+     * (highest frequency) and logging a warning. This prevents extractor failures when legacy
+     * collections exist at multiple cadences for the same path.
+     */
+    static Map<String, PulseChunkMetadata> buildMetadataMap(List<PulseChunkMetadata> metadataList) {
+        if (metadataList == null) {
+            return Map.of();
+        }
+
+        return metadataList.stream().collect(Collectors.toMap(
+                PulseChunkMetadata::getPath,
+                meta -> meta,
+                (existing, incoming) -> {
+                    Long existingRate = existing.getSamplingRate();
+                    Long incomingRate = incoming.getSamplingRate();
+                    // Prefer non-null lowest sampling rate; if equal or missing, keep existing
+                    boolean incomingIsBetter = existingRate == null
+                            || (incomingRate != null && incomingRate < existingRate);
+                    if (incomingIsBetter) {
+                        log.warn("Duplicate metadata for path {}, keeping samplingRate {} over {}", incoming.getPath(), incomingRate, existingRate);
+                        return incoming;
+                    }
+                    log.warn("Duplicate metadata for path {}, keeping samplingRate {} over {}", existing.getPath(), existingRate, incomingRate);
+                    return existing;
+                }
+        ));
     }
 
 }
