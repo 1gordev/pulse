@@ -9,6 +9,7 @@ import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
 import com.id.pulse.modules.measures.model.*;
 import com.id.pulse.modules.measures.model.enums.PulseSourceType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
+import com.id.pulse.modules.measures.model.enums.PulseComputationMode;
 import com.id.pulse.modules.measures.service.MeasureHookService;
 import com.id.pulse.modules.parser.PulseDataMatrixParser;
 import com.id.pulse.modules.poller.service.LatestValuesBucket;
@@ -49,12 +50,19 @@ public class MeasureTransformer {
     private final LatestValuesBucket latestValuesBucket;
     private final MeasureHookService measureHookService;
 
-    // Tracks BN measures executed once per reprocessing session for ON_REPROCESSING_INIT
+    // Tracks BN measures executed once per reprocessing session for ON_FIRST_CYCLE
     private final Set<String> bnReprocessingSeen = ConcurrentHashMap.newKeySet();
+    // Tracks BN measures executed once per runtime for ON_FIRST_CYCLE in realtime
+    private final Set<String> bnRealtimeSeen = ConcurrentHashMap.newKeySet();
+    // Tracks measures executed once per reprocessing session for ON_FIRST_CYCLE
+    private final Set<String> measureReprocessingSeen = ConcurrentHashMap.newKeySet();
+    // Tracks measures executed once per runtime for ON_FIRST_CYCLE in realtime
+    private final Set<String> measureRealtimeSeen = ConcurrentHashMap.newKeySet();
 
     private static final String BNET_COMPUTATION_MODE_CONTINUOUS = "CONTINUOUS";
-    private static final String BNET_COMPUTATION_MODE_ON_REPROCESSING_INIT = "ON_REPROCESSING_INIT";
-    private static final String BNET_COMPUTATION_MODE_KEY = "BNET_COMPUTATION_MODE";
+    private static final String BNET_COMPUTATION_MODE_ON_FIRST_CYCLE = "ON_FIRST_CYCLE";
+    private static final String BNET_COMPUTATION_MODE_REALTIME_KEY = "BNET_COMPUTATION_MODE_REALTIME";
+    private static final String BNET_COMPUTATION_MODE_REPROCESSING_KEY = "BNET_COMPUTATION_MODE_REPROCESSING";
 
     @Autowired
     public MeasureTransformer(AlarmsCrudService alarmsCrudService,
@@ -383,17 +391,47 @@ public class MeasureTransformer {
             }
         }
 
-        // Force CONTINUOUS BN measures every run (and enqueue so downstream deps propagate)
-        selectBnByMode(measureMap, BNET_COMPUTATION_MODE_CONTINUOUS)
+        String computationModeKey = resolveBnetModeKey(run);
+
+        // Force CONTINUOUS measures every run (and enqueue so downstream deps propagate)
+        selectMeasuresByMode(measureMap, run, PulseComputationMode.CONTINUOUS)
                 .forEach(m -> {
                     if (impacted.add(m)) queue.add(m);
                 });
 
-        // ON_REPROCESSING_INIT: only once per session
+        // ON_FIRST_CYCLE: once per reprocessing session, or once per runtime for realtime
         if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
-            selectBnByMode(measureMap, BNET_COMPUTATION_MODE_ON_REPROCESSING_INIT).forEach(mPath -> {
+            selectMeasuresByMode(measureMap, run, PulseComputationMode.ON_FIRST_CYCLE).forEach(mPath -> {
+                String key = mPath + "#" + run.getReprocessingSessionId();
+                if (measureReprocessingSeen.add(key) && impacted.add(mPath)) {
+                    queue.add(mPath);
+                }
+            });
+        } else if (run != null && !run.isReprocessing()) {
+            selectMeasuresByMode(measureMap, run, PulseComputationMode.ON_FIRST_CYCLE).forEach(mPath -> {
+                if (measureRealtimeSeen.add(mPath) && impacted.add(mPath)) {
+                    queue.add(mPath);
+                }
+            });
+        }
+
+        // Force CONTINUOUS BN measures every run (and enqueue so downstream deps propagate)
+        selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_CONTINUOUS)
+                .forEach(m -> {
+                    if (impacted.add(m)) queue.add(m);
+                });
+
+        // ON_FIRST_CYCLE: once per reprocessing session, or once per runtime for realtime
+        if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
+            selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_ON_FIRST_CYCLE).forEach(mPath -> {
                 String key = mPath + "#" + run.getReprocessingSessionId();
                 if (bnReprocessingSeen.add(key) && impacted.add(mPath)) {
+                    queue.add(mPath);
+                }
+            });
+        } else if (run != null && !run.isReprocessing()) {
+            selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_ON_FIRST_CYCLE).forEach(mPath -> {
+                if (bnRealtimeSeen.add(mPath) && impacted.add(mPath)) {
                     queue.add(mPath);
                 }
             });
@@ -454,17 +492,50 @@ public class MeasureTransformer {
         return new BuildOrderListResult(orderedMeasures, origDeps);
     }
 
-    private List<String> selectBnByMode(Map<String, PulseMeasure> measureMap, String mode) {
-        if (mode == null) {
+    private List<String> selectBnByMode(Map<String, PulseMeasure> measureMap, String modeKey, String mode) {
+        if (modeKey == null || mode == null) {
             return List.of();
         }
         return measureMap.values().stream()
                 .filter(Objects::nonNull)
                 .filter(m -> m.getDetails() != null)
-                .filter(m -> mode.equals(m.getDetails().get(BNET_COMPUTATION_MODE_KEY)))
+                .filter(m -> mode.equals(m.getDetails().get(modeKey)))
                 .map(PulseMeasure::getPath)
                 .filter(Objects::nonNull)
                 .toList();
+    }
+
+    private List<String> selectMeasuresByMode(Map<String, PulseMeasure> measureMap,
+                                              TransformerRun run,
+                                              PulseComputationMode mode) {
+        if (mode == null) {
+            return List.of();
+        }
+        return measureMap.values().stream()
+                .filter(Objects::nonNull)
+                .filter(m -> resolveMeasureMode(m, run) == mode)
+                .map(PulseMeasure::getPath)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private PulseComputationMode resolveMeasureMode(PulseMeasure measure, TransformerRun run) {
+        if (measure == null) {
+            return PulseComputationMode.ON_FIRST_CYCLE;
+        }
+        if (run != null && run.isReprocessing()) {
+            PulseComputationMode mode = measure.getReprocessingComputationMode();
+            return mode != null ? mode : PulseComputationMode.ON_FIRST_CYCLE;
+        }
+        PulseComputationMode mode = measure.getRealtimeComputationMode();
+        return mode != null ? mode : PulseComputationMode.ON_FIRST_CYCLE;
+    }
+
+    private String resolveBnetModeKey(TransformerRun run) {
+        if (run != null && run.isReprocessing()) {
+            return BNET_COMPUTATION_MODE_REPROCESSING_KEY;
+        }
+        return BNET_COMPUTATION_MODE_REALTIME_KEY;
     }
 
     private List<PulseDataPoint> applyTransformations(

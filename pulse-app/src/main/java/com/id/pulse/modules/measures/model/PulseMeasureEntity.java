@@ -2,6 +2,7 @@ package com.id.pulse.modules.measures.model;
 
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
+import com.id.pulse.modules.measures.model.enums.PulseComputationMode;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -30,6 +31,8 @@ public class PulseMeasureEntity {
     public static final String VALIDITY = "validity";
     public static final String PRECISION = "precision";
     public static final String TRANSFORM_TYPE = "transformType";
+    public static final String REALTIME_COMPUTATION_MODE = "realtimeComputationMode";
+    public static final String REPROCESSING_COMPUTATION_MODE = "reprocessingComputationMode";
     public static final String DETAILS = "details";
 
 
@@ -49,6 +52,8 @@ public class PulseMeasureEntity {
     private Long validity;
     private Long precision;
     private PulseTransformType transformType;
+    private PulseComputationMode realtimeComputationMode;
+    private PulseComputationMode reprocessingComputationMode;
     private Map<String, Object> details;
 
 }

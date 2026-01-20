@@ -2,6 +2,7 @@ package com.id.pulse.modules.measures.model;
 
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
+import com.id.pulse.modules.measures.model.enums.PulseComputationMode;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -37,6 +38,10 @@ public class PulseMeasure {
     private Long precision = 3L;
     @Builder.Default
     private PulseTransformType transformType = PulseTransformType.COPY_LATEST;
+    @Builder.Default
+    private PulseComputationMode realtimeComputationMode = PulseComputationMode.ON_FIRST_CYCLE;
+    @Builder.Default
+    private PulseComputationMode reprocessingComputationMode = PulseComputationMode.ON_FIRST_CYCLE;
 
     @Builder.Default
     private Map<String, Object> details = new HashMap<>();
