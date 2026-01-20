@@ -50,17 +50,7 @@ public class MeasureTransformer {
     private final LatestValuesBucket latestValuesBucket;
     private final MeasureHookService measureHookService;
 
-    // Tracks BN measures executed once per reprocessing session for ON_FIRST_CYCLE
-    private final Set<String> bnReprocessingSeen = ConcurrentHashMap.newKeySet();
-    // Tracks BN measures executed once per runtime for ON_FIRST_CYCLE in realtime
-    private final Set<String> bnRealtimeSeen = ConcurrentHashMap.newKeySet();
-    // Tracks measures executed once per reprocessing session for ON_FIRST_CYCLE
-    private final Set<String> measureReprocessingSeen = ConcurrentHashMap.newKeySet();
-    // Tracks measures executed once per runtime for ON_FIRST_CYCLE in realtime
-    private final Set<String> measureRealtimeSeen = ConcurrentHashMap.newKeySet();
-
     private static final String BNET_COMPUTATION_MODE_CONTINUOUS = "CONTINUOUS";
-    private static final String BNET_COMPUTATION_MODE_ON_FIRST_CYCLE = "ON_FIRST_CYCLE";
     private static final String BNET_COMPUTATION_MODE_REALTIME_KEY = "BNET_COMPUTATION_MODE_REALTIME";
     private static final String BNET_COMPUTATION_MODE_REPROCESSING_KEY = "BNET_COMPUTATION_MODE_REPROCESSING";
 
@@ -399,43 +389,11 @@ public class MeasureTransformer {
                     if (impacted.add(m)) queue.add(m);
                 });
 
-        // ON_FIRST_CYCLE: once per reprocessing session, or once per runtime for realtime
-        if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
-            selectMeasuresByMode(measureMap, run, PulseComputationMode.ON_FIRST_CYCLE).forEach(mPath -> {
-                String key = mPath + "#" + run.getReprocessingSessionId();
-                if (measureReprocessingSeen.add(key) && impacted.add(mPath)) {
-                    queue.add(mPath);
-                }
-            });
-        } else if (run != null && !run.isReprocessing()) {
-            selectMeasuresByMode(measureMap, run, PulseComputationMode.ON_FIRST_CYCLE).forEach(mPath -> {
-                if (measureRealtimeSeen.add(mPath) && impacted.add(mPath)) {
-                    queue.add(mPath);
-                }
-            });
-        }
-
         // Force CONTINUOUS BN measures every run (and enqueue so downstream deps propagate)
         selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_CONTINUOUS)
                 .forEach(m -> {
                     if (impacted.add(m)) queue.add(m);
                 });
-
-        // ON_FIRST_CYCLE: once per reprocessing session, or once per runtime for realtime
-        if (run != null && run.isReprocessing() && run.getReprocessingSessionId() != null) {
-            selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_ON_FIRST_CYCLE).forEach(mPath -> {
-                String key = mPath + "#" + run.getReprocessingSessionId();
-                if (bnReprocessingSeen.add(key) && impacted.add(mPath)) {
-                    queue.add(mPath);
-                }
-            });
-        } else if (run != null && !run.isReprocessing()) {
-            selectBnByMode(measureMap, computationModeKey, BNET_COMPUTATION_MODE_ON_FIRST_CYCLE).forEach(mPath -> {
-                if (bnRealtimeSeen.add(mPath) && impacted.add(mPath)) {
-                    queue.add(mPath);
-                }
-            });
-        }
         // Propagate through measure dependencies
         while (!queue.isEmpty()) {
             String cur = queue.poll();
@@ -521,14 +479,14 @@ public class MeasureTransformer {
 
     private PulseComputationMode resolveMeasureMode(PulseMeasure measure, TransformerRun run) {
         if (measure == null) {
-            return PulseComputationMode.ON_FIRST_CYCLE;
+            return PulseComputationMode.ON_INPUT_TRIGGER;
         }
         if (run != null && run.isReprocessing()) {
             PulseComputationMode mode = measure.getReprocessingComputationMode();
-            return mode != null ? mode : PulseComputationMode.ON_FIRST_CYCLE;
+            return mode != null ? mode : PulseComputationMode.ON_INPUT_TRIGGER;
         }
         PulseComputationMode mode = measure.getRealtimeComputationMode();
-        return mode != null ? mode : PulseComputationMode.ON_FIRST_CYCLE;
+        return mode != null ? mode : PulseComputationMode.ON_INPUT_TRIGGER;
     }
 
     private String resolveBnetModeKey(TransformerRun run) {

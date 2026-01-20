@@ -1,12 +1,17 @@
 package com.id.pulse.modules.measures.logic;
 
 import com.id.pulse.model.PulseDataPoint;
+import com.id.pulse.modules.alarms.service.AlarmsCrudService;
 import com.id.pulse.modules.channel.model.enums.PulseDataType;
 import com.id.pulse.modules.datapoints.ingestor.service.DataIngestor;
 import com.id.pulse.modules.measures.model.PulseMeasure;
 import com.id.pulse.modules.measures.model.PulseUpStream;
+import com.id.pulse.modules.measures.model.ScriptEvaluatorResult;
 import com.id.pulse.modules.measures.model.enums.PulseSourceType;
+import com.id.pulse.modules.measures.model.enums.PulseComputationMode;
 import com.id.pulse.modules.measures.model.enums.PulseTransformType;
+import com.id.pulse.modules.measures.service.MeasureHookService;
+import com.id.pulse.modules.measures.service.MeasureJsEvaluator;
 import com.id.pulse.modules.measures.service.MeasuresCrudService;
 import com.id.pulse.modules.measures.model.TransformerRun;
 import com.id.pulse.modules.measures.service.MeasureTransformer;
@@ -18,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.junit.jupiter.api.BeforeEach;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -33,14 +39,26 @@ class MeasureTransformerTest {
     @Mock
     private MeasuresCrudService measuresCrudService;
     @Mock
+    private AlarmsCrudService alarmsCrudService;
+    @Mock
     private DataIngestor dataIngestor;
     @Mock
     private LatestValuesBucket latestValuesBucket;
+    @Mock
+    private MeasureJsEvaluator measureJsEvaluator;
+    @Mock
+    private MeasureHookService measureHookService;
     @InjectMocks
     private MeasureTransformer measureTransformer;
 
     @Captor
     private ArgumentCaptor<Map<Long, Object>> tsCaptor;
+
+    @BeforeEach
+    void setupDefaults() {
+        when(measureHookService.fetchProvideMeasureList()).thenReturn(List.of());
+        when(alarmsCrudService.findAll()).thenReturn(List.of());
+    }
 
     @Test
     void testExecuteSumLatestLong() {
@@ -221,5 +239,104 @@ class MeasureTransformerTest {
 
         // Verify writes for all
         verify(dataIngestor, times(6)).writeAsync(eq(meta), anyMap());
+    }
+
+    @Test
+    void testJavascriptMeasureRunsWhenContinuousWithoutUpstreams() {
+        PulseMeasure m = PulseMeasure.builder()
+                .path("JS_CONT")
+                .dataType(PulseDataType.DOUBLE)
+                .transformType(PulseTransformType.JAVASCRIPT)
+                .realtimeComputationMode(PulseComputationMode.CONTINUOUS)
+                .details(Map.of("js_script", "1 + 1"))
+                .build();
+        when(measuresCrudService.findAll()).thenReturn(List.of(m));
+
+        PulseChunkMetadata meta = mock(PulseChunkMetadata.class);
+        when(dataIngestor.prepareMetadata(MeasureTransformer.MEASURES_GROUP, "JS_CONT", PulseDataType.DOUBLE, 100L))
+                .thenReturn(meta);
+        when(dataIngestor.writeAsync(eq(meta), anyMap()))
+                .thenReturn(CompletableFuture.completedFuture(mock(PulseIngestorWriteResult.class)));
+
+        when(measureJsEvaluator.evaluate(eq(1000L), anyString(), any(), any(), anyString()))
+                .thenReturn(ScriptEvaluatorResult.builder().ok(true).result(2.0).build());
+
+        TransformerRun run = new TransformerRun(List.of(), 1000L, 100L);
+        List<PulseDataPoint> results = measureTransformer.execute(run);
+
+        assertEquals(1, results.size());
+        assertEquals("JS_CONT", results.get(0).getPath());
+        assertEquals(2.0, results.get(0).getVal());
+        verify(measureJsEvaluator).evaluate(eq(1000L), anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void testJavascriptMeasureDoesNotRunWithoutUpstreamWhenOnInputTrigger() {
+        PulseMeasure m = PulseMeasure.builder()
+                .path("JS_TRIGGER")
+                .dataType(PulseDataType.DOUBLE)
+                .transformType(PulseTransformType.JAVASCRIPT)
+                .realtimeComputationMode(PulseComputationMode.ON_INPUT_TRIGGER)
+                .details(Map.of("js_script", "1 + 1"))
+                .build();
+        when(measuresCrudService.findAll()).thenReturn(List.of(m));
+
+        TransformerRun run = new TransformerRun(List.of(), 1000L, 100L);
+        List<PulseDataPoint> results = measureTransformer.execute(run);
+
+        assertTrue(results.isEmpty());
+        verifyNoInteractions(measureJsEvaluator);
+        verifyNoInteractions(dataIngestor);
+    }
+
+    @Test
+    void testBayesianRestMeasureRunsWhenContinuousWithoutUpstreams() {
+        PulseMeasure m = PulseMeasure.builder()
+                .path("BN_OUT")
+                .dataType(PulseDataType.DOUBLE)
+                .transformType(PulseTransformType.REST)
+                .details(Map.of(
+                        "BNET_COMPUTATION_MODE_REALTIME", "CONTINUOUS",
+                        "BNET_COMPUTATION_MODE_REPROCESSING", "CONTINUOUS"
+                ))
+                .build();
+        when(measuresCrudService.findAll()).thenReturn(List.of(m));
+        when(measureHookService.computeMeasure(any()))
+                .thenReturn(Optional.of(0.7));
+
+        PulseChunkMetadata meta = mock(PulseChunkMetadata.class);
+        when(dataIngestor.prepareMetadata(MeasureTransformer.MEASURES_GROUP, "BN_OUT", PulseDataType.DOUBLE, 100L))
+                .thenReturn(meta);
+        when(dataIngestor.writeAsync(eq(meta), anyMap()))
+                .thenReturn(CompletableFuture.completedFuture(mock(PulseIngestorWriteResult.class)));
+
+        TransformerRun run = new TransformerRun(List.of(), 1000L, 100L);
+        List<PulseDataPoint> results = measureTransformer.execute(run);
+
+        assertEquals(1, results.size());
+        assertEquals("BN_OUT", results.get(0).getPath());
+        assertEquals(0.7, results.get(0).getVal());
+        verify(measureHookService).computeMeasure(any());
+    }
+
+    @Test
+    void testBayesianRestMeasureDoesNotRunWhenOnInputTriggerWithoutUpstreams() {
+        PulseMeasure m = PulseMeasure.builder()
+                .path("BN_TRIGGER")
+                .dataType(PulseDataType.DOUBLE)
+                .transformType(PulseTransformType.REST)
+                .details(Map.of(
+                        "BNET_COMPUTATION_MODE_REALTIME", "ON_INPUT_TRIGGER",
+                        "BNET_COMPUTATION_MODE_REPROCESSING", "ON_INPUT_TRIGGER"
+                ))
+                .build();
+        when(measuresCrudService.findAll()).thenReturn(List.of(m));
+
+        TransformerRun run = new TransformerRun(List.of(), 1000L, 100L);
+        List<PulseDataPoint> results = measureTransformer.execute(run);
+
+        assertTrue(results.isEmpty());
+        verify(measureHookService, never()).computeMeasure(any());
+        verifyNoInteractions(dataIngestor);
     }
 }

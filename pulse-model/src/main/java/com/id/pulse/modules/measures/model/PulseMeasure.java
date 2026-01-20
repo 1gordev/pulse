@@ -39,9 +39,9 @@ public class PulseMeasure {
     @Builder.Default
     private PulseTransformType transformType = PulseTransformType.COPY_LATEST;
     @Builder.Default
-    private PulseComputationMode realtimeComputationMode = PulseComputationMode.ON_FIRST_CYCLE;
+    private PulseComputationMode realtimeComputationMode = PulseComputationMode.ON_INPUT_TRIGGER;
     @Builder.Default
-    private PulseComputationMode reprocessingComputationMode = PulseComputationMode.ON_FIRST_CYCLE;
+    private PulseComputationMode reprocessingComputationMode = PulseComputationMode.ON_INPUT_TRIGGER;
 
     @Builder.Default
     private Map<String, Object> details = new HashMap<>();
