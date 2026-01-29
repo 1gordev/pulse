@@ -187,6 +187,17 @@ public class ChannelPoller {
                         return PollOutcome.empty();
                     }
 
+                    if (reason != ConnectorCallReason.LIVE) {
+                        toPublish.stream()
+                                .filter(dp -> dp.getBatchId() != null && !dp.getBatchId().isBlank())
+                                .findFirst()
+                                .ifPresent(dp -> log.info(
+                                        "Replay ingest got batchId {} (group {})",
+                                        dp.getBatchId(),
+                                        group.getCode()
+                                ));
+                    }
+
                     publish(List.of(group), toPublish, reason, reprocessingSessionId);
 
                     long latestTs = toPublish.stream()

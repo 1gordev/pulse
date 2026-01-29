@@ -70,6 +70,7 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     public PulseConnectorStatus open(PulseConnector connector) {
         try {
             this.batchId = UUID.randomUUID().toString();
+            log.info("CSV connector {} opened with batchId {}", connector != null ? connector.getCode() : "unknown", batchId);
             Objects.requireNonNull(connector, "connector");
             Map<String, Object> params = Optional.ofNullable(connector.getParams()).orElse(Map.of());
             this.filePath = Optional.ofNullable(params.get("filePath")).map(Object::toString).orElse("");

@@ -104,6 +104,7 @@ public class ReplayInjector {
 
             connectionManager.setReplayMode(connector.getCode(), true);
             job.setBatchId(connectionManager.getBatchId(connector.getCode()));
+            log.info("Replay job {} for connector {} uses batchId {}", job.getId(), connector.getCode(), job.getBatchId());
             replayJobStore.upsert(job);
             ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds, callReason);
 
@@ -247,6 +248,20 @@ public class ReplayInjector {
     }
 
     private boolean ensureConnectorReady(ReplayJob job, String connectorCode) throws InterruptedException {
+        // Ensure any previous instance is fully terminated to avoid stale CONNECTED status/batchId.
+        connectionManager.terminateConnection(connectorCode);
+        long shutdownStart = System.currentTimeMillis();
+        while ((System.currentTimeMillis() - shutdownStart) < CONNECTOR_READY_TIMEOUT.toMillis()) {
+            PulseConnectorStatus status = connectorsRegistry.getStatus(connectorCode);
+            if (status != PulseConnectorStatus.CONNECTED) {
+                break;
+            }
+            if (job.isCancellationRequested()) {
+                return false;
+            }
+            Thread.sleep(CONNECTOR_STATUS_POLL_MS);
+        }
+
         connectionManager.initiateConnection(connectorCode);
         long start = System.currentTimeMillis();
         PulseConnectorStatus status;
