@@ -376,12 +376,14 @@ public class ChannelPoller {
 
             // Extract the timeseries from the data points
             Map<Long, Object> timeSeries = new HashMap<>();
+            Map<Long, String> batchIdsByTs = new HashMap<>();
             dataPointsOfPath.forEach(dataPoint -> {
                 timeSeries.put(dataPoint.getTms(), dataPoint.getVal());
+                batchIdsByTs.put(dataPoint.getTms(), dataPoint.getBatchId());
             });
 
             // Write the data points to the ingestor
-            dataIngestor.writeAsync(metadata, timeSeries)
+            dataIngestor.writeAsync(metadata, timeSeries, batchIdsByTs)
                     .thenAccept(result -> log.trace("Ingestor perfs: %s".formatted(result)))
                     .exceptionally(ex -> {
                         log.error("Error writing data to ingestor", ex);

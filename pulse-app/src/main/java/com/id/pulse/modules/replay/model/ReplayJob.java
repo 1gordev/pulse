@@ -16,6 +16,7 @@ public class ReplayJob {
     private final AtomicReference<Instant> startedAt = new AtomicReference<>();
     private final AtomicReference<Instant> completedAt = new AtomicReference<>();
     private final AtomicBoolean cancellationRequested = new AtomicBoolean(false);
+    private final AtomicReference<String> batchId = new AtomicReference<>();
 
     private volatile Long sourceStartTimestamp;
     private volatile Long sourceEndTimestamp;
@@ -74,6 +75,14 @@ public class ReplayJob {
         return completedAt.get();
     }
 
+    public String getBatchId() {
+        return batchId.get();
+    }
+
+    public void setBatchId(String value) {
+        batchId.set(value);
+    }
+
     public void setSourceBounds(Long startTimestamp, Long endTimestamp) {
         this.sourceStartTimestamp = startTimestamp;
         this.sourceEndTimestamp = endTimestamp;
@@ -97,7 +106,8 @@ public class ReplayJob {
                 getStartedAt(),
                 getCompletedAt(),
                 sourceStartTimestamp,
-                sourceEndTimestamp
+                sourceEndTimestamp,
+                getBatchId()
         );
     }
 

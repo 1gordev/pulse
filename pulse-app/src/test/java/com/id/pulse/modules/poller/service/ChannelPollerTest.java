@@ -46,8 +46,8 @@ class ChannelPollerAggregateTest {
         List<PulseChannel> channels = List.of(channel);
 
         // Create two data points in successive windows: [0,100) and [100,200)
-        PulseDataPoint dp1 = new PulseDataPoint(GROUP, PATH, 10L, PulseDataType.DOUBLE, 1.0);
-        PulseDataPoint dp2 = new PulseDataPoint(GROUP, PATH, 150L, PulseDataType.DOUBLE, 2.0);
+        PulseDataPoint dp1 = new PulseDataPoint(GROUP, PATH, 10L, PulseDataType.DOUBLE, 1.0, null);
+        PulseDataPoint dp2 = new PulseDataPoint(GROUP, PATH, 150L, PulseDataType.DOUBLE, 2.0, null);
         List<PulseDataPoint> dataPoints = List.of(dp1, dp2);
 
         // Invoke private aggregate via reflection

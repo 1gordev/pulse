@@ -25,6 +25,7 @@ public class PulseChunk<T> {
     public static final String DATA_TYPE = "dataType";
     public static final String TS = "ts";
     public static final String V = "v";
+    public static final String BATCH_IDS = "batchIds";
 
     public static final String PATH_START_END_TYPE_IDX = "path_start_end_type_idx";
 
@@ -41,5 +42,8 @@ public class PulseChunk<T> {
 
     @Builder.Default
     private List<T> v = new ArrayList<>();
+
+    @Builder.Default
+    private List<String> batchIds = new ArrayList<>();
 
 }

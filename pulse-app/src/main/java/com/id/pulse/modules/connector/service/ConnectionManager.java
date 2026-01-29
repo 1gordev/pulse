@@ -162,4 +162,15 @@ public class ConnectionManager {
                     return null;
                 });
     }
+
+    public String getBatchId(String connectorCode) {
+        IPulseConnectorRunner runner = instances.get(connectorCode);
+        if (runner != null) {
+            try {
+                return runner.getBatchId();
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
 }

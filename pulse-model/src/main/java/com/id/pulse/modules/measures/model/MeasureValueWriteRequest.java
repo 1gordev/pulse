@@ -13,6 +13,7 @@ public class MeasureValueWriteRequest {
     private String path;
     private Double value;
     private Long timestamp;
+    private String batchId;
 
     /**
      * Optional sampling interval (ms) to be used when persisting the value.

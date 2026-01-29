@@ -235,12 +235,14 @@ public class MeasureTransformer {
 
                 // Extract the timeseries from the data points
                 Map<Long, Object> timeSeries = new HashMap<>();
+                Map<Long, String> batchIdsByTs = new HashMap<>();
                 dataPoints.forEach(dataPoint -> {
                     timeSeries.put(dataPoint.getTms(), dataPoint.getVal());
+                    batchIdsByTs.put(dataPoint.getTms(), dataPoint.getBatchId());
                 });
 
                 // Write the data points to the ingestor
-                dataIngestor.writeAsync(metadata, timeSeries)
+                dataIngestor.writeAsync(metadata, timeSeries, batchIdsByTs)
                         .thenAccept(result -> log.trace("Ingestor perfs: %s".formatted(result)))
                         .exceptionally(ex -> {
                             log.error("Error writing data to ingestor", ex);
@@ -584,6 +586,7 @@ public class MeasureTransformer {
 
             Object safeVal = getSafeValue(measure.getDataType());
             Object val = safeVal;
+            String batchId = resolveBatchId(measure.getTransformType(), resolvedDeps, currentValue);
             if (measure.getTransformType() == PulseTransformType.REST) {
                 //  This ensure transformREST is called even if resolvedDeps is empty
                 val = transformRest(tms, intervalMs, measure, resolvedDeps);
@@ -618,6 +621,7 @@ public class MeasureTransformer {
                     .tms(tms)
                     .type(measure.getDataType())
                     .val(val)
+                    .batchId(batchId)
                     .build();
         } catch (Exception e) {
             log.error("Error transforming measure {}: {}", measure.getPath(), e.getMessage());
@@ -627,6 +631,7 @@ public class MeasureTransformer {
                     .tms(tms)
                     .type(measure.getDataType())
                     .val(getSafeValue(measure.getDataType()))
+                    .batchId(currentValue != null ? currentValue.getBatchId() : null)
                     .build();
         }
     }
@@ -643,11 +648,16 @@ public class MeasureTransformer {
 
         Map<String, Object> upstreamValues = latestByPath.values().stream()
                 .collect(Collectors.toMap(PulseDataPoint::getPath, PulseDataPoint::getVal));
+        String batchId = latestByPath.values().stream()
+                .max(Comparator.comparingLong(PulseDataPoint::getTms))
+                .map(PulseDataPoint::getBatchId)
+                .orElse(null);
 
         var payload = PulseMeasureRestCompute.builder()
                 .measurePath(measure.getPath())
                 .upstreamValues(upstreamValues)
                 .tms(tms)
+                .batchId(batchId)
                 .intervalMs(intervalMs)
                 .build();
 
@@ -697,6 +707,19 @@ public class MeasureTransformer {
             case BOOLEAN -> false;
             case STRING -> "";
         };
+    }
+
+    private String resolveBatchId(PulseTransformType transformType, List<PulseDataPoint> deps, PulseDataPoint currentValue) {
+        if (deps != null && !deps.isEmpty()) {
+            if (transformType == PulseTransformType.COPY_LATEST) {
+                return deps.getFirst().getBatchId();
+            }
+            return deps.stream()
+                    .max(Comparator.comparingLong(PulseDataPoint::getTms))
+                    .map(PulseDataPoint::getBatchId)
+                    .orElse(currentValue != null ? currentValue.getBatchId() : null);
+        }
+        return currentValue != null ? currentValue.getBatchId() : null;
     }
 
     private Object transformMinLatest(PulseDataType dataType, List<PulseDataPoint> deps) {

@@ -9,6 +9,7 @@ import com.id.pulse.modules.timeseries.model.PulseChunkMetadata;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.index.Index;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
@@ -122,36 +123,55 @@ public class DataIngestor {
         }
         var model = new PulseChunkMetadata();
         BeanUtils.copyProperties(entity, model);
+
+        // Ensure batchId index exists on the data collection
+        try {
+            mongoTemplate.indexOps(collectionName)
+                    .ensureIndex(new Index().on(PulseChunk.BATCH_IDS, org.springframework.data.domain.Sort.Direction.ASC));
+        } catch (Exception ex) {
+            log.warn("Failed to ensure batchIds index on {}", collectionName, ex);
+        }
+
         return model;
     }
 
-    public CompletableFuture<PulseIngestorWriteResult> writeAsync(PulseChunkMetadata metadata, Map<Long, Object> timeSeries) {
-        return CompletableFuture.supplyAsync(() -> writeSync(metadata, timeSeries), executor);
+    public CompletableFuture<PulseIngestorWriteResult> writeAsync(PulseChunkMetadata metadata,
+                                                                  Map<Long, Object> timeSeries,
+                                                                  Map<Long, String> batchIdsByTs) {
+        return CompletableFuture.supplyAsync(() -> writeSync(metadata, timeSeries, batchIdsByTs), executor);
     }
 
-    private PulseIngestorWriteResult writeSync(PulseChunkMetadata metadata, Map<Long, Object> timeSeries) {
+    public CompletableFuture<PulseIngestorWriteResult> writeAsync(PulseChunkMetadata metadata, Map<Long, Object> timeSeries) {
+        return writeAsync(metadata, timeSeries, Map.of());
+    }
+
+    private PulseIngestorWriteResult writeSync(PulseChunkMetadata metadata,
+                                               Map<Long, Object> timeSeries,
+                                               Map<Long, String> batchIdsByTs) {
         // Put data into chunks. Create them if they don't exist
         return switch (metadata.getType()) {
             case DOUBLE ->
-                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Double>>(), metadata, metadata.getType(), timeSeries);
+                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Double>>(), metadata, metadata.getType(), timeSeries, batchIdsByTs);
             case LONG ->
-                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Long>>(), metadata, metadata.getType(), timeSeries);
+                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Long>>(), metadata, metadata.getType(), timeSeries, batchIdsByTs);
             case STRING ->
-                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<String>>(), metadata, metadata.getType(), timeSeries);
+                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<String>>(), metadata, metadata.getType(), timeSeries, batchIdsByTs);
             case BOOLEAN ->
-                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Boolean>>(), metadata, metadata.getType(), timeSeries);
+                    writeSyncTyped(new LinkedHashMap<String, PulseChunk<Boolean>>(), metadata, metadata.getType(), timeSeries, batchIdsByTs);
         };
     }
 
     private <T> PulseIngestorWriteResult writeSyncTyped(Map<String, PulseChunk<T>> chunkMap,
                                                         PulseChunkMetadata metadata,
                                                         PulseDataType dataType,
-                                                        Map<Long, Object> timeSeries) {
+                                                        Map<Long, Object> timeSeries,
+                                                        Map<Long, String> batchIdsByTs) {
 
         // Fill chunks
         for (Map.Entry<Long, Object> entry : timeSeries.entrySet()) {
             long ts = entry.getKey();
             T value = getTypedValue(dataType, entry.getValue());
+            String batchId = batchIdsByTs != null ? batchIdsByTs.get(ts) : null;
 
             if (ts <= 0) {
                 log.warn("Ignoring data point with non-positive timestamp: %d".formatted(ts));
@@ -185,6 +205,7 @@ public class DataIngestor {
                     // Update the chunk with the new data point
                     chunk.getTs().add(nTs);
                     chunk.getV().add(value);
+                    chunk.getBatchIds().add(batchId);
                 }
             }
         }
@@ -204,7 +225,8 @@ public class DataIngestor {
                             .setOnInsert(PulseChunk.TS_END, chunk.getTsEnd())
                             .setOnInsert(PulseChunk.DATA_TYPE, chunk.getDataType())
                             .push(PulseChunk.TS).each(chunk.getTs())
-                            .push(PulseChunk.V).each(chunk.getV());
+                            .push(PulseChunk.V).each(chunk.getV())
+                            .push(PulseChunk.BATCH_IDS).each(chunk.getBatchIds());
 
                     mongoTemplate.upsert(
                             query(Criteria.where(PulseChunk.ID).is(chunk.getId())),

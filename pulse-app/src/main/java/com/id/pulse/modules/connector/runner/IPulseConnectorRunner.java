@@ -20,8 +20,15 @@ public interface IPulseConnectorRunner {
     CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap);
 
     default CompletableFuture<List<PulseDataPoint>> query(Map<PulseChannelGroup, List<PulseChannel>> channelsMap,
-                                                          ConnectorCallReason reason) {
+                                                         ConnectorCallReason reason) {
         return query(channelsMap);
+    }
+
+    /**
+     * Optional batch identifier for datapoints emitted by this connector runner.
+     */
+    default String getBatchId() {
+        return null;
     }
 
     default int getReplayProgressPercent() {

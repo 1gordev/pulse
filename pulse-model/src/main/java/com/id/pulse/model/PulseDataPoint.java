@@ -14,5 +14,6 @@ public class PulseDataPoint {
     private Long tms;
     private PulseDataType type;
     private Object val;
+    private String batchId;
 
 }

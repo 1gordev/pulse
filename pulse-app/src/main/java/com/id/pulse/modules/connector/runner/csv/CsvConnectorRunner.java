@@ -61,6 +61,7 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     private volatile long processedRows = 0L;
     private volatile int progressPercent = 0;
     private volatile long batchStartMillis = 0L;
+    private volatile String batchId;
 
     // minor: log suppression for missing columns
     private final Set<String> missingColumnsWarned = new HashSet<>();
@@ -68,6 +69,7 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
     @Override
     public PulseConnectorStatus open(PulseConnector connector) {
         try {
+            this.batchId = UUID.randomUUID().toString();
             Objects.requireNonNull(connector, "connector");
             Map<String, Object> params = Optional.ofNullable(connector.getParams()).orElse(Map.of());
             this.filePath = Optional.ofNullable(params.get("filePath")).map(Object::toString).orElse("");
@@ -668,8 +670,14 @@ public class CsvConnectorRunner implements IPulseConnectorRunner {
                         .tms(outTms)
                         .type(ch.getDataType())
                         .val(valueToEmit)
+                        .batchId(batchId)
                         .build());
             }
         });
+    }
+
+    @Override
+    public String getBatchId() {
+        return batchId;
     }
 }

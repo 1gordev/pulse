@@ -71,6 +71,7 @@ public class DpAccumulator {
                 .tms(tmsAccEnd)
                 .type(PulseDataType.DOUBLE)
                 .val(avg)
+                .batchId(resolveBatchId())
                 .build();
     }
 
@@ -78,7 +79,8 @@ public class DpAccumulator {
         var builder = PulseDataPoint.builder()
                 .groupCode(groupCode)
                 .path(path)
-                .tms(tmsAccEnd);
+                .tms(tmsAccEnd)
+                .batchId(resolveBatchId());
 
         switch (type) {
             case DOUBLE -> {
@@ -109,6 +111,7 @@ public class DpAccumulator {
                 .tms(tmsAccEnd)
                 .type(dataType)
                 .val(minValue)
+                .batchId(resolveBatchId())
                 .build();
     }
 
@@ -124,6 +127,14 @@ public class DpAccumulator {
                 .tms(tmsAccEnd)
                 .type(dataType)
                 .val(maxValue)
+                .batchId(resolveBatchId())
                 .build();
+    }
+
+    private String resolveBatchId() {
+        return dps.stream()
+                .max(Comparator.comparingLong(PulseDataPoint::getTms))
+                .map(PulseDataPoint::getBatchId)
+                .orElse(null);
     }
 }

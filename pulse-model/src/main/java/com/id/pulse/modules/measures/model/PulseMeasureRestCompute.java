@@ -20,6 +20,11 @@ public class PulseMeasureRestCompute {
     private Long tms;
 
     /**
+     * Optional batch identifier propagated from upstreams (e.g., connectors).
+     */
+    private String batchId;
+
+    /**
      * Optional sampling interval (ms) of the triggering acquisition group.
      * When provided, downstream writers (e.g., BN outputs) can store results
      * using the same cadence instead of falling back to defaults.

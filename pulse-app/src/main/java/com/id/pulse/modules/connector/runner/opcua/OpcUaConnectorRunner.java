@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -38,9 +39,11 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
     private volatile Thread monitorThread;
     private volatile String endpointUrl;
     private volatile long reconnectSeconds;
+    private volatile String batchId;
 
     @Override
     public PulseConnectorStatus open(PulseConnector connector) {
+        this.batchId = UUID.randomUUID().toString();
         this.endpointUrl = Optional.ofNullable(connector.getParams().get("endpointUrl"))
                 .map(Object::toString)
                 .orElse("");
@@ -209,6 +212,7 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
                                                         .val(convValue)
                                                         .tms(getOpcTs(opcValue))
                                                         .type(channel.getDataType())
+                                                        .batchId(batchId)
                                                         .build());
                                             },
                                             () -> log.warn("Failed to convert value for channel '%s'".formatted(channel.getPath()))
@@ -229,6 +233,11 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
 
             return dataPoints;
         });
+    }
+
+    @Override
+    public String getBatchId() {
+        return batchId;
     }
 
     private static long getOpcTs(DataValue opcValue) {
@@ -301,4 +310,3 @@ public class OpcUaConnectorRunner implements IPulseConnectorRunner {
     }
 
 }
-

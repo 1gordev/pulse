@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 public class ReplayService {
 
     private final ObjectProvider<ReplayInjector> replayInjectorProvider;
+    private final ReplayJobStore replayJobStore;
     private final ConcurrentHashMap<String, ReplayJob> jobs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ReplayJob> activeJobsByConnector = new ConcurrentHashMap<>();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
@@ -32,8 +33,10 @@ public class ReplayService {
 
     private static final int MAX_HISTORY = 100;
 
-    public ReplayService(ObjectProvider<ReplayInjector> replayInjectorProvider) {
+    public ReplayService(ObjectProvider<ReplayInjector> replayInjectorProvider,
+                         ReplayJobStore replayJobStore) {
         this.replayInjectorProvider = replayInjectorProvider;
+        this.replayJobStore = replayJobStore;
     }
 
     public ReplayJobView startReprocessing(String connectorCode) {
@@ -54,6 +57,7 @@ public class ReplayService {
         job.setStatus(ReplayJobStatus.PENDING);
         registerJob(job);
         activeJobsByConnector.put(connectorCode, job);
+        replayJobStore.upsert(job);
 
         ReplayInjector injector = replayInjectorProvider.getObject();
         CompletableFuture
@@ -62,30 +66,23 @@ public class ReplayService {
                     if (throwable != null) {
                         job.setStatus(ReplayJobStatus.FAILED);
                         job.setStatusMessage(throwable.getMessage());
+                        replayJobStore.upsert(job);
                     }
                     if (!isActive(job)) {
                         activeJobsByConnector.compute(connectorCode, (code, current) -> current == job ? null : current);
                     }
+                    replayJobStore.pruneHistory(MAX_HISTORY);
                 });
 
         return job.toView();
     }
 
     public Optional<ReplayJobView> findJob(String jobId) {
-        return Optional.ofNullable(jobs.get(jobId)).map(ReplayJob::toView);
+        return replayJobStore.findById(jobId);
     }
 
     public List<ReplayJobView> listJobs() {
-        List<String> orderedIds = new ArrayList<>(jobOrder);
-        List<ReplayJobView> result = new ArrayList<>(orderedIds.size());
-        for (int i = orderedIds.size() - 1; i >= 0 && result.size() < MAX_HISTORY; i--) {
-            String id = orderedIds.get(i);
-            ReplayJob job = jobs.get(id);
-            if (job != null) {
-                result.add(job.toView());
-            }
-        }
-        return result;
+        return replayJobStore.listLatest(MAX_HISTORY);
     }
 
     public Map<String, ReplayJobView> listActiveReplays() {
@@ -105,6 +102,7 @@ public class ReplayService {
         }
         job.requestCancel();
         job.setStatusMessage("Cancellation requested");
+        replayJobStore.upsert(job);
         return job.toView();
     }
 
@@ -147,5 +145,6 @@ public class ReplayService {
             }
             attempts++;
         }
+        replayJobStore.pruneHistory(MAX_HISTORY);
     }
 }

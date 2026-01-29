@@ -52,19 +52,22 @@ public class ReplayInjector {
     private final ConnectorsRegistry connectorsRegistry;
     private final ChannelPoller channelPoller;
     private final ReprocessingStatusNotifier reprocessingStatusNotifier;
+    private final com.id.pulse.modules.replay.service.ReplayJobStore replayJobStore;
 
     public ReplayInjector(ConnectorsCrudService connectorsCrudService,
                           ChannelGroupsCrudService channelGroupsCrudService,
                           ConnectionManager connectionManager,
                           ConnectorsRegistry connectorsRegistry,
                           ChannelPoller channelPoller,
-                          ReprocessingStatusNotifier reprocessingStatusNotifier) {
+                          ReprocessingStatusNotifier reprocessingStatusNotifier,
+                          com.id.pulse.modules.replay.service.ReplayJobStore replayJobStore) {
         this.connectorsCrudService = connectorsCrudService;
         this.channelGroupsCrudService = channelGroupsCrudService;
         this.connectionManager = connectionManager;
         this.connectorsRegistry = connectorsRegistry;
         this.channelPoller = channelPoller;
         this.reprocessingStatusNotifier = reprocessingStatusNotifier;
+        this.replayJobStore = replayJobStore;
     }
 
     public void reprocess(ReplayJob job) {
@@ -72,6 +75,7 @@ public class ReplayInjector {
         try {
             job.setStatus(ReplayJobStatus.RUNNING);
             reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.STARTED);
+            replayJobStore.upsert(job);
 
             PulseConnector connector = connectorsCrudService.findByCode(job.getConnectorCode())
                     .orElseThrow(() -> new IllegalArgumentException("Connector not found: " + job.getConnectorCode()));
@@ -80,7 +84,9 @@ public class ReplayInjector {
             validateConnector(connector, callReason);
             CsvBounds bounds = resolveCsvBounds(connector);
             job.setSourceBounds(bounds.startTimestamp(), bounds.endTimestamp());
+            replayJobStore.upsert(job);
             job.updateProgress(0);
+            replayJobStore.upsert(job);
 
             List<PulseChannelGroup> groups = channelGroupsCrudService.findByConnectorCode(connector.getCode());
             if (groups.isEmpty()) {
@@ -90,17 +96,21 @@ public class ReplayInjector {
             if (!ensureConnectorReady(job, connector.getCode())) {
                 job.setStatus(ReplayJobStatus.CANCELLED);
                 job.setStatusMessage("Reprocessing cancelled");
+                replayJobStore.upsert(job);
                 log.info("Reprocessing cancelled before start for connector {}", connector.getCode());
                 reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.CANCELLED);
                 return;
             }
 
             connectionManager.setReplayMode(connector.getCode(), true);
+            job.setBatchId(connectionManager.getBatchId(connector.getCode()));
+            replayJobStore.upsert(job);
             ReprocessLoopResult loopResult = executeReprocessingLoop(job, connector.getCode(), groups, bounds, callReason);
 
             if (loopResult.cancelled()) {
                 job.setStatus(ReplayJobStatus.CANCELLED);
                 job.setStatusMessage("Reprocessing cancelled");
+                replayJobStore.upsert(job);
                 log.info("Reprocessing cancelled for connector {}", connector.getCode());
                 reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.CANCELLED);
                 return;
@@ -116,6 +126,7 @@ public class ReplayInjector {
             job.updateProgress(100);
             job.setStatus(ReplayJobStatus.COMPLETED);
             job.setStatusMessage("Reprocessing completed");
+            replayJobStore.upsert(job);
             log.info("Reprocessing completed for connector {}", connector.getCode());
             reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.COMPLETED);
         } catch (Exception e) {
@@ -124,6 +135,7 @@ public class ReplayInjector {
             }
             job.setStatus(ReplayJobStatus.FAILED);
             job.setStatusMessage(e.getMessage());
+            replayJobStore.upsert(job);
             log.error("Reprocessing failed for connector {}: {}", job.getConnectorCode(), e.getMessage(), e);
             reprocessingStatusNotifier.notifyStatus(job.getId(), ReprocessingSessionStatus.FAILED);
         } finally {
@@ -339,6 +351,7 @@ public class ReplayInjector {
         } else {
             job.updateProgress(computeProgress(latestTimestamp, bounds));
         }
+        replayJobStore.upsert(job);
     }
 
     private static String stripBom(String value) {

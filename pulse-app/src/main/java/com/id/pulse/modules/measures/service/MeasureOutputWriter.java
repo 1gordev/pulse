@@ -85,6 +85,7 @@ public class MeasureOutputWriter {
                 .tms(timestamp)
                 .type(dataType)
                 .val(coercedValue)
+                .batchId(request.getBatchId())
                 .build();
 
         PulseChannelGroup virtualGroup = PulseChannelGroup.builder()
@@ -106,7 +107,8 @@ public class MeasureOutputWriter {
         );
 
         Map<Long, Object> timeSeries = Map.of(dp.getTms(), coercedValue);
-        dataIngestor.writeAsync(metadata, timeSeries)
+        Map<Long, String> batchIdsByTs = Map.of(dp.getTms(), dp.getBatchId());
+        dataIngestor.writeAsync(metadata, timeSeries, batchIdsByTs)
                 .exceptionally(ex -> {
                     log.error("Error writing bayesian output for {} to ingestor", measure.getPath(), ex);
                     return null;

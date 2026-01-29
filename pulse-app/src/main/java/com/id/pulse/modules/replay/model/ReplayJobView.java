@@ -11,6 +11,7 @@ public record ReplayJobView(
         Instant startedAt,
         Instant completedAt,
         Long sourceStartTimestamp,
-        Long sourceEndTimestamp
+        Long sourceEndTimestamp,
+        String batchId
 ) {
 }
